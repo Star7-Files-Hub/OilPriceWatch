@@ -1,0 +1,729 @@
+{
+  "generated_at": "2026-09-19T00:43:44",
+  "realtime": {
+    "brent": {
+      "price": 99.184,
+      "high": 100.15,
+      "low": 97.8,
+      "date": "2026-09-19",
+      "name": "布伦特原油",
+      "raw": [
+        "99.184",
+        "",
+        "99.080",
+        "99.110",
+        "100.150",
+        "97.800",
+        "00:43:37",
+        "99.930",
+        "99.400",
+        "0",
+        "3",
+        "3",
+        "2026-09-19",
+        "布伦特原油",
+        "316825"
+      ]
+    },
+    "wti": {
+      "price": 95.895,
+      "high": 98.01,
+      "low": 94.83,
+      "date": "2026-09-19",
+      "name": "纽约原油",
+      "raw": [
+        "95.895",
+        "",
+        "95.990",
+        "96.010",
+        "98.010",
+        "94.830",
+        "00:43:39",
+        "97.230",
+        "96.480",
+        "0",
+        "6",
+        "11",
+        "2026-09-19",
+        "纽约原油",
+        "0"
+      ]
+    },
+    "sc": {
+      "price": 731.9,
+      "open": 739.7,
+      "high": 757.2,
+      "low": 728.6,
+      "name": "上海原油连续",
+      "raw": [
+        "上海原油连续",
+        "004341",
+        "739.700",
+        "757.200",
+        "728.600",
+        "0.000",
+        "731.900",
+        "732.000",
+        "731.900",
+        "0.000",
+        "754.400",
+        "3",
+        "1",
+        "41695.000",
+        "120556",
+        "沪",
+        "上海原油",
+        "2026-09-19",
+        "1",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "748.006",
+        "0.000",
+        "0",
+        "0.000",
+        "0",
+        "0.000",
+        "0",
+        "0.000",
+        "0",
+        "0.000",
+        "0",
+        "0.000",
+        "0",
+        "0.000",
+        "0",
+        "0.000",
+        "0"
+      ]
+    },
+    "usdcny": {
+      "price": 6.6984,
+      "raw": [
+        "00:38:01",
+        "6.6984000000",
+        "6.7000000000",
+        "6.6990000000",
+        "53.0000000000",
+        "6.7005000000",
+        "6.7015000000",
+        "6.6962000000",
+        "6.6990000000",
+        "在岸人民币",
+        "0.0000",
+        "0.0000",
+        "0.0053",
+        "此行情由新浪财经计算得出",
+        "0.0000",
+        "0.0000",
+        "",
+        "2026-09-19"
+      ]
+    }
+  },
+  "kline_counts": {
+    "brent": 80,
+    "wti": 80
+  },
+  "provinces": {
+    "beijing": {
+      "slug": "beijing",
+      "name": "北京",
+      "region": "华北",
+      "prices": {
+        "92": 8.29,
+        "95": 8.83,
+        "0": 8.02
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "tianjin": {
+      "slug": "tianjin",
+      "name": "天津",
+      "region": "华北",
+      "prices": {
+        "92": 8.29,
+        "95": 8.76,
+        "0": 7.98
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "hebei": {
+      "slug": "hebei",
+      "name": "河北",
+      "region": "华北",
+      "prices": {
+        "92": 8.29,
+        "95": 8.76,
+        "0": 7.98
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "shanxi": {
+      "slug": "shanxi",
+      "name": "山西",
+      "region": "华北",
+      "prices": {
+        "92": 8.24,
+        "95": 8.89,
+        "0": 8.04
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "neimenggu": {
+      "slug": "neimenggu",
+      "name": "内蒙古",
+      "region": "华北",
+      "prices": {
+        "92": 8.3,
+        "95": 8.81,
+        "0": 7.82
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "liaoning": {
+      "slug": "liaoning",
+      "name": "辽宁",
+      "region": "东北",
+      "prices": {
+        "92": 8.36,
+        "95": 8.94,
+        "0": 7.87
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "jilin": {
+      "slug": "jilin",
+      "name": "吉林",
+      "region": "东北",
+      "prices": {
+        "92": 8.26,
+        "95": 8.91,
+        "0": 7.88
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "heilongjiang": {
+      "slug": "heilongjiang",
+      "name": "黑龙江",
+      "region": "东北",
+      "prices": {
+        "92": 8.26,
+        "95": 8.85,
+        "0": 7.76
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "shanghai": {
+      "slug": "shanghai",
+      "name": "上海",
+      "region": "华东",
+      "prices": {
+        "92": 8.25,
+        "95": 8.78,
+        "0": 7.95
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "jiangsu": {
+      "slug": "jiangsu",
+      "name": "江苏",
+      "region": "华东",
+      "prices": {
+        "92": 8.26,
+        "95": 8.79,
+        "0": 7.93
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "zhejiang": {
+      "slug": "zhejiang",
+      "name": "浙江",
+      "region": "华东",
+      "prices": {
+        "92": 8.26,
+        "95": 8.79,
+        "0": 7.95
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "anhui": {
+      "slug": "anhui",
+      "name": "安徽",
+      "region": "华东",
+      "prices": {
+        "92": 8.24,
+        "95": 8.81,
+        "0": 8.01
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "fujian": {
+      "slug": "fujian",
+      "name": "福建",
+      "region": "华东",
+      "prices": {
+        "92": 8.25,
+        "95": 8.81,
+        "0": 7.96
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "jiangxi": {
+      "slug": "jiangxi",
+      "name": "江西",
+      "region": "华东",
+      "prices": {
+        "92": 8.25,
+        "95": 8.86,
+        "0": 8.02
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "shandong": {
+      "slug": "shandong",
+      "name": "山东",
+      "region": "华东",
+      "prices": {
+        "92": 8.26,
+        "95": 8.86,
+        "0": 7.88
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "henan": {
+      "slug": "henan",
+      "name": "河南",
+      "region": "华中",
+      "prices": {
+        "92": 8.3,
+        "95": 8.87,
+        "0": 7.96
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "hubei": {
+      "slug": "hubei",
+      "name": "湖北",
+      "region": "华中",
+      "prices": {
+        "92": 8.31,
+        "95": 8.89,
+        "0": 7.96
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "hunan": {
+      "slug": "hunan",
+      "name": "湖南",
+      "region": "华中",
+      "prices": {
+        "92": 8.24,
+        "95": 8.76,
+        "0": 8.04
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "guangdong": {
+      "slug": "guangdong",
+      "name": "广东",
+      "region": "华南",
+      "prices": {
+        "92": 8.31,
+        "95": 9.0,
+        "0": 7.98
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "guangxi": {
+      "slug": "guangxi",
+      "name": "广西",
+      "region": "华南",
+      "prices": {
+        "92": 8.35,
+        "95": 9.02,
+        "0": 8.03
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "hainan": {
+      "slug": "hainan",
+      "name": "海南",
+      "region": "华南",
+      "prices": {
+        "92": 9.41,
+        "95": 9.99,
+        "0": 8.06
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "chongqing": {
+      "slug": "chongqing",
+      "name": "重庆",
+      "region": "西南",
+      "prices": {
+        "92": 8.35,
+        "95": 8.82,
+        "0": 8.03
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "sichuan": {
+      "slug": "sichuan",
+      "name": "四川",
+      "region": "西南",
+      "prices": {
+        "92": 8.39,
+        "95": 8.96,
+        "0": 8.01
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "guizhou": {
+      "slug": "guizhou",
+      "name": "贵州",
+      "region": "西南",
+      "prices": {
+        "92": 8.42,
+        "95": 8.9,
+        "0": 8.07
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "yunnan": {
+      "slug": "yunnan",
+      "name": "云南",
+      "region": "西南",
+      "prices": {
+        "92": 8.44,
+        "95": 9.06,
+        "0": 8.04
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "xizang": {
+      "slug": "xizang",
+      "name": "西藏",
+      "region": "西南",
+      "prices": {
+        "92": 9.17,
+        "95": 9.69,
+        "0": 8.5
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "shanxi-3": {
+      "slug": "shanxi-3",
+      "name": "陕西",
+      "region": "西北",
+      "prices": {
+        "92": 8.17,
+        "95": 8.64,
+        "0": 7.86
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "gansu": {
+      "slug": "gansu",
+      "name": "甘肃",
+      "region": "西北",
+      "prices": {
+        "92": 8.3,
+        "95": 8.86,
+        "0": 7.87
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "qinghai": {
+      "slug": "qinghai",
+      "name": "青海",
+      "region": "西北",
+      "prices": {
+        "92": 8.25,
+        "95": 8.85,
+        "0": 7.89
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "ningxia": {
+      "slug": "ningxia",
+      "name": "宁夏",
+      "region": "西北",
+      "prices": {
+        "92": 8.19,
+        "95": 8.65,
+        "0": 7.85
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    },
+    "xinjiang": {
+      "slug": "xinjiang",
+      "name": "新疆",
+      "region": "西北",
+      "prices": {
+        "92": 8.07,
+        "95": 8.64,
+        "0": 7.71
+      },
+      "forecast": {
+        "direction": "上调",
+        "yuan_per_ton": 635.0,
+        "yuan_per_liter_min": 0.48,
+        "yuan_per_liter_max": 0.57,
+        "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+      },
+      "complete": true
+    }
+  },
+  "forecast": {
+    "cycle_workdays": 10,
+    "anchor": null,
+    "window_sizes": {
+      "brent": 10,
+      "wti": 10
+    },
+    "ratios": {
+      "brent": 0.12976,
+      "wti": 0.13774
+    },
+    "weighted_ratio": 0.13211,
+    "coefficient_used": 50.0,
+    "self": {
+      "yuan_per_ton": 660.5,
+      "yuan_per_liter": {
+        "92": 0.489,
+        "95": 0.487,
+        "0": 0.558
+      },
+      "direction": "上调",
+      "will_adjust": true,
+      "status": "上调"
+    },
+    "site": {
+      "direction": "上调",
+      "yuan_per_ton": 635.0,
+      "yuan_per_liter_min": 0.48,
+      "yuan_per_liter_max": 0.57,
+      "text": "目前预计上调油价635元/吨(0.48元/升-0.57元/升),大家相互转告油价又涨了。"
+    },
+    "implied_coefficient": 48.1,
+    "consistent": true,
+    "notes": [],
+    "deviation": 0.04
+  }
+}

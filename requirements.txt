@@ -1,0 +1,7 @@
+# OilPriceWatch 依赖
+# 第一阶段已用：httpx（HTTP 客户端，沙箱代理/编码/重试封装在 app/net.py）
+httpx>=0.27
+# 第二阶段：FastAPI 服务 + uvicorn 运行 + APScheduler 定时刷新
+fastapi>=0.110
+uvicorn[standard]>=0.29
+apscheduler>=3.10

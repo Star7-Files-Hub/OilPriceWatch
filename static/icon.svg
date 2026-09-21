@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <rect width="512" height="512" rx="96" fill="#0f1115"/>
+  <circle cx="256" cy="256" r="150" fill="#4c8dff"/>
+  <text x="256" y="256" font-size="170" font-family="-apple-system, 'PingFang SC', 'Microsoft YaHei', sans-serif"
+        fill="#ffffff" text-anchor="middle" dominant-baseline="central">油</text>
+</svg>

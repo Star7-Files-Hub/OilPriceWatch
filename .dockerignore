@@ -1,0 +1,12 @@
+# 不要打进镜像
+.git
+__pycache__
+*.pyc
+*.pyo
+data
+*.db
+outputs
+probe
+.env
+deploy
+server.log

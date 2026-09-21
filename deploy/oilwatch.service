@@ -1,0 +1,18 @@
+[Unit]
+Description=OilPriceWatch 油价监控服务
+After=network.target
+
+[Service]
+Type=simple
+User=oilwatch
+WorkingDirectory=/opt/oilwatch
+# 环境变量（token、密钥等）放这里，不要写进代码
+EnvironmentFile=/opt/oilwatch/.env
+# 只监听本机，由 nginx 反代对外；OILWATCH_TLS_INSECURE 千万别在服务器上设
+ExecStart=/opt/oilwatch/venv/bin/uvicorn app.main:app --host 127.0.0.1 --port 8000
+Restart=always
+RestartSec=5
+# 日志交给 journald：journalctl -u oilwatch -f
+
+[Install]
+WantedBy=multi-user.target

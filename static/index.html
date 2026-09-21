@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<meta name="theme-color" content="#0f1115" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<link rel="manifest" href="/static/manifest.webmanifest" />
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="/static/icon-192.png" />
+<title>全国油价监控 · 调价预测</title>
+<style>
+  :root {
+    --bg: #0f1115; --card: #181b22; --line: #262b35; --fg: #e6e9ef;
+    --muted: #9aa3b2; --up: #ff5d5d; --down: #2ecc71; --accent: #4c8dff;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--fg);
+    font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+    -webkit-text-size-adjust: 100%;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; padding: 16px; }
+  h1 { font-size: 20px; margin: 8px 0 2px; }
+  .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
+  .locate { font-size: 12px; color: var(--muted); margin-bottom: 12px; min-height: 18px; }
+  .locate b { color: var(--accent); }
+  .locate a { color: var(--muted); text-decoration: underline; margin-left: 6px; }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 14px; margin-bottom: 14px;
+  }
+  .forecast-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .big { font-size: 28px; font-weight: 700; }
+  .up { color: var(--up); } .down { color: var(--down); }
+  .pill {
+    font-size: 12px; padding: 2px 8px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  .pill.ok { color: var(--down); border-color: var(--down); }
+  .pill.warn { color: #ffcc4d; border-color: #ffcc4d; }
+  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+  .cell { background: #11141a; border-radius: 8px; padding: 10px; text-align: center; }
+  .cell .k { font-size: 11px; color: var(--muted); }
+  .cell .v { font-size: 18px; font-weight: 600; margin-top: 4px; }
+  .note { color: #ffcc4d; font-size: 12px; margin-top: 8px; }
+  .bar { height: 6px; background: #11141a; border-radius: 4px; overflow: hidden; margin-top: 8px; }
+  .bar > i { display: block; height: 100%; background: var(--accent); }
+  .row { display: flex; justify-content: space-between; font-size: 13px; color: var(--muted); margin-top: 6px; }
+  select {
+    width: 100%; padding: 10px; background: #11141a; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 10px; font-size: 15px; margin-bottom: 12px;
+  }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { padding: 9px 6px; text-align: right; border-bottom: 1px solid var(--line); }
+  th:first-child, td:first-child { text-align: left; }
+  th { color: var(--muted); font-weight: 500; font-size: 12px; }
+  .region-h { color: var(--accent); font-size: 12px; padding-top: 8px; }
+  .err { color: var(--up); }
+  footer { color: var(--muted); font-size: 11px; text-align: center; padding: 16px 0; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>⛽ 全国油价监控</h1>
+  <div class="sub" id="updated">加载中…</div>
+  <div class="locate" id="locate"></div>
+
+  <div class="card" id="forecastCard" style="display:none">
+    <div class="forecast-head">
+      <span class="big" id="fcBig">—</span>
+      <span id="fcStatus"></span>
+      <span id="fcConsist"></span>
+    </div>
+    <div class="grid">
+      <div class="cell"><div class="k">92# 元/升</div><div class="v" id="fc92">—</div></div>
+      <div class="cell"><div class="k">95# 元/升</div><div class="v" id="fc95">—</div></div>
+      <div class="cell"><div class="k">0# 元/升</div><div class="v" id="fc0">—</div></div>
+    </div>
+    <div id="fcNotes"></div>
+    <div id="windowBox" style="display:none; margin-top:12px;">
+      <div class="row"><span id="wText"></span><span id="wRemain"></span></div>
+      <div class="bar"><i id="wBar"></i></div>
+    </div>
+  </div>
+
+  <select id="provinceSel"><option value="">全部省份</option></select>
+
+  <div class="card" style="padding:0;">
+    <table id="priceTable">
+      <thead><tr><th>省份</th><th>92#</th><th>95#</th><th>0#柴油</th></tr></thead>
+      <tbody id="priceBody"></tbody>
+    </table>
+  </div>
+
+  <footer>
+    数据来源：汽油价格网 / 新浪财经 · 调价预测为按机制确定性推算，仅供参考<br/>
+    <a href="/privacy">隐私政策</a> · 可「添加到主屏幕」离线查看
+  </footer>
+</div>
+
+<script>
+const fmt = (n) => (n == null ? "—" : n.toFixed(2));
+const signed = (n) => (n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(3));
+const PROVINCES_CACHE = {};  // slug -> 行数据，供自动定位后高亮
+let PRESET = null;            // /api/locate 返回的省份 slug
+
+async function locate() {
+  try {
+    const r = await fetch("/api/locate");
+    if (!r.ok) return;
+    const d = await r.json();
+    if (d.province) {
+      PRESET = d.province;
+      const loc = document.getElementById("locate");
+      loc.innerHTML = "已定位到 <b>" + (d.name || d.province) + "</b> 的油价" +
+        "<a href='#' id='locClear'>查看全部</a>";
+      document.getElementById("locClear").onclick = (e) => {
+        e.preventDefault();
+        PRESET = null;
+        document.getElementById("locate").innerHTML = "";
+        document.getElementById("provinceSel").value = "";
+        load();
+      };
+    }
+  } catch (e) { /* 定位失败静默降级为手动选择 */ }
+}
+
+async function load() {
+  const el = (id) => document.getElementById(id);
+  let snap;
+  try {
+    const r = await fetch("/api/snapshot");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    snap = await r.json();
+  } catch (e) {
+    el("updated").innerHTML = '<span class="err">加载失败：' + e.message + '</span>';
+    return;
+  }
+
+  el("updated").textContent = "更新时间：" + (snap.generated_at || "").replace("T", " ");
+  for (const p of Object.values(snap.provinces || {})) PROVINCES_CACHE[p.slug] = p;
+
+  const f = snap.forecast || {};
+  const self = f.self;
+  if (self) {
+    el("forecastCard").style.display = "block";
+    const cls = self.direction === "下调" ? "down" : "up";
+    el("fcBig").className = "big " + cls;
+    el("fcBig").textContent = (self.direction === "下调" ? "↓ " : "↑ ") +
+      Math.abs(self.yuan_per_ton).toFixed(0) + " 元/吨";
+    el("fcStatus").innerHTML = "<span class='pill " +
+      (self.status === "搁浅" ? "warn" : "ok") + "'>" + self.status + "</span>";
+    const c = f.consistent;
+    el("fcConsist").innerHTML = "<span class='pill " +
+      (c === true ? "ok" : c === false ? "warn" : "") + "'>" +
+      (c === true ? "与网站一致" : c === false ? "与网站不一致" : "无法判定") + "</span>";
+    el("fc92").textContent = signed(self.yuan_per_liter["92"]);
+    el("fc95").textContent = signed(self.yuan_per_liter["95"]);
+    el("fc0").textContent = signed(self.yuan_per_liter["0"]);
+    el("fcNotes").innerHTML = (f.notes || [])
+      .map((n) => "<div class='note'>⚠ " + n + "</div>").join("");
+  }
+
+  const w = snap.window;
+  if (w) {
+    el("windowBox").style.display = "block";
+    el("wText").textContent = "上次 " + w.anchor + " → 下次 " + w.next_date;
+    el("wRemain").textContent = "剩 " + w.workdays_remaining + " 个工作日";
+    el("wBar").style.width = Math.round((w.progress || 0) * 100) + "%";
+  }
+
+  const provinces = Object.values(snap.provinces || {});
+  const sel = el("provinceSel");
+  provinces.sort((a, b) => (a.region > b.region ? 1 : a.region < b.region ? -1 : 0));
+  const built = sel.options.length > 1;
+  if (!built) {
+    for (const p of provinces) {
+      const o = document.createElement("option");
+      o.value = p.slug; o.textContent = p.name;
+      sel.appendChild(o);
+    }
+  }
+  // 自动定位：优先选中定位到的省份
+  if (PRESET && !built) sel.value = PRESET;
+  const selVal = sel.value;
+
+  let lastRegion = null;
+  const body = el("priceBody");
+  body.innerHTML = "";
+  for (const p of provinces) {
+    if (selVal && p.slug !== selVal && p.name !== selVal) continue;
+    if (p.region !== lastRegion) {
+      const hr = document.createElement("tr");
+      hr.innerHTML = "<td class='region-h' colspan='4'>" + p.region + "</td>";
+      body.appendChild(hr);
+      lastRegion = p.region;
+    }
+    const tr = document.createElement("tr");
+    const pr = p.prices || {};
+    tr.innerHTML = "<td>" + p.name + "</td><td>" + fmt(pr["92"]) +
+      "</td><td>" + fmt(pr["95"]) + "</td><td>" + fmt(pr["0"]) + "</td>";
+    body.appendChild(tr);
+  }
+  sel.onchange = () => { PRESET = null; document.getElementById("locate").innerHTML = ""; load(); };
+}
+
+// Service Worker：注册后可"添加到主屏幕"并离线看壳（需 HTTPS 或 localhost）
+if ("serviceWorker" in navigator) {
+  navigator.serviceWorker.register("/static/sw.js").catch(() => {});
+}
+
+locate().finally(load);
+setInterval(load, 5 * 60 * 1000); // 每 5 分钟刷新页面缓存展示
+</script>
+</body>
+</html>

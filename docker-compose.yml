@@ -1,0 +1,15 @@
+services:
+  oilwatch:
+    build: .
+    image: oilwatch:latest
+    container_name: oilwatch
+    restart: unless-stopped
+    # 密钥从 .env 读（含 OILWATCH_TG_BOT_TOKEN 等），不要把 .env 提交到 git
+    env_file:
+      - .env
+    # 只绑本机，由宿主机 nginx 反代对外（见 deploy/nginx-oilwatch.conf）
+    ports:
+      - "127.0.0.1:8000:8000"
+    # SQLite 缓存与订阅者持久化到宿主机
+    volumes:
+      - ./data:/app/data
