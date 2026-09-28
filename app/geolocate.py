@@ -63,8 +63,20 @@ ENGLISH_TO_SLUG: dict[str, str] = {
 }
 
 # 结果缓存：同一 IP 一小时查一次即可，避免打爆免费接口。
+# ⚠️ 必须**限量**：这是公开服务，每个新访客 IP 都会加一条，不设上限就是稳定的内存泄漏。
 _CACHE: dict[str, tuple[float, str | None]] = {}
 _CACHE_TTL = 3600.0
+_CACHE_MAX = 4096
+
+
+def _cache_put(ip: str, now: float, slug: str | None) -> None:
+    if len(_CACHE) >= _CACHE_MAX:
+        # 先清过期；还满就直接清空（缓存只是省调用，丢了不影响正确性）
+        for key in [k for k, (ts, _) in _CACHE.items() if now - ts >= _CACHE_TTL]:
+            _CACHE.pop(key, None)
+        if len(_CACHE) >= _CACHE_MAX:
+            _CACHE.clear()
+    _CACHE[ip] = (now, slug)
 
 
 def _normalize_cn(name: str) -> str:
@@ -117,5 +129,5 @@ def ip_to_province(ip: str) -> str | None:
         logger.info("IP 定位失败 %s: %s", ip, exc)
         slug = None
 
-    _CACHE[ip] = (now, slug)
+    _cache_put(ip, now, slug)
     return slug

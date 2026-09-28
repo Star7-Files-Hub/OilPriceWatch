@@ -24,7 +24,7 @@
   .wrap { max-width: 720px; margin: 0 auto; padding: 16px; }
   h1 { font-size: 20px; margin: 8px 0 2px; }
   .sub { color: var(--muted); font-size: 12px; margin-bottom: 10px; }
-  .locate { font-size: 12px; color: var(--muted); margin-bottom: 12px; min-height: 18px; }
+  .locate { font-size: 12px; color: var(--muted); margin-bottom: 12px; min-height: 18px; line-height: 1.7; }
   .locate b { color: var(--accent); }
   .locate a { color: var(--muted); text-decoration: underline; margin-left: 6px; }
   .card {
@@ -57,6 +57,8 @@
   th:first-child, td:first-child { text-align: left; }
   th { color: var(--muted); font-weight: 500; font-size: 12px; }
   .region-h { color: var(--accent); font-size: 12px; padding-top: 8px; }
+  tr.mine td { background: rgba(76,141,255,.10); }
+  tr.mine td:first-child { font-weight: 600; }
   .err { color: var(--up); }
   footer { color: var(--muted); font-size: 11px; text-align: center; padding: 16px 0; }
   a { color: var(--accent); }
@@ -102,47 +104,120 @@
   </footer>
 </div>
 
+<!-- 定位相关：provinces.js 是 54KB 省级边界（压缩坐标），geo.js 负责解码 + 判定。
+     换算全在本机做，经纬度不发往服务器。见 /privacy 第一节。 -->
+<script src="/static/provinces.js"></script>
+<script src="/static/geo.js"></script>
 <script>
 const fmt = (n) => (n == null ? "—" : n.toFixed(2));
 const signed = (n) => (n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(3));
-const PROVINCES_CACHE = {};  // slug -> 行数据，供自动定位后高亮
-let PRESET = null;            // /api/locate 返回的省份 slug
 
-async function locate() {
+let SNAP = null;         // 最近一次快照
+let PRESET_NAME = null;  // 自动定位到的省名（浏览器定位 或 IP 推断）
+let LOCATE_HOW = null;   // "browser" | "ip" | "failed"
+let MANUAL = false;      // 用户手动选过省份 / 点过「查看全部」⇒ 不再自动覆盖
+
+/* --- 定位 ---------------------------------------------------------------
+ * 两条路，都只得到省级结果：
+ *   1) 浏览器定位：需 HTTPS + 用户授权，最准。坐标在本机换算成省份，不发往服务器。
+ *   2) IP 推断：无需授权，任何情况都能用，但会因 VPN / 运营商出口而不准。
+ * 流程：IP 先出结果（快，不阻塞首屏），浏览器定位在后台升级并覆盖。
+ */
+const GEO_OPTS = { enableHighAccuracy: false, timeout: 8000, maximumAge: 10 * 60 * 1000 };
+
+function canUseBrowserGeo() {
+  // ⚠️ 浏览器定位是「强力功能」，只在安全上下文（HTTPS / localhost）可用。
+  //    http 页面上 Chrome / Safari / Firefox 都会直接拒绝，问了也是白问，还白弹一次提示框。
+  if (!window.isSecureContext) return false;
+  if (!navigator.geolocation) return false;
+  return !!(window.CNGeo && window.CN_PROVINCE_SHAPES);
+}
+
+function browserLocate() {
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (pos) => resolve(window.CNGeo.locate(pos.coords.latitude, pos.coords.longitude)),
+      () => resolve(null),
+      GEO_OPTS
+    );
+  });
+}
+
+async function locateByIp() {
   try {
     const r = await fetch("/api/locate");
     if (!r.ok) return;
     const d = await r.json();
-    if (d.province) {
-      PRESET = d.province;
-      const loc = document.getElementById("locate");
-      loc.innerHTML = "已定位到 <b>" + (d.name || d.province) + "</b> 的油价" +
-        "<a href='#' id='locClear'>查看全部</a>";
-      document.getElementById("locClear").onclick = (e) => {
-        e.preventDefault();
-        PRESET = null;
-        document.getElementById("locate").innerHTML = "";
-        document.getElementById("provinceSel").value = "";
-        load();
-      };
-    }
+    if (d.name) { PRESET_NAME = d.name; LOCATE_HOW = "ip"; }
   } catch (e) { /* 定位失败静默降级为手动选择 */ }
 }
 
-async function load() {
-  const el = (id) => document.getElementById(id);
-  let snap;
-  try {
-    const r = await fetch("/api/snapshot");
-    if (!r.ok) throw new Error("HTTP " + r.status);
-    snap = await r.json();
-  } catch (e) {
-    el("updated").innerHTML = '<span class="err">加载失败：' + e.message + '</span>';
-    return;
+async function upgradeWithBrowserGeo() {
+  if (canUseBrowserGeo()) {
+    const name = await browserLocate();
+    if (name) {
+      // 精确定位成功：覆盖 IP 结果（哪怕两者相同，也要把来源标成「定位」）
+      LOCATE_HOW = "browser";
+      if (name !== PRESET_NAME) PRESET_NAME = name;
+      refresh();
+      return;
+    }
   }
+  if (!PRESET_NAME) { LOCATE_HOW = "failed"; renderLocateLine(); }
+}
+
+function findProvince(name) {
+  if (!SNAP || !name) return null;
+  return Object.values(SNAP.provinces || {}).find((p) => p.name === name) || null;
+}
+
+/** 状态行 + 表格一起重绘 —— 分头调很容易漏一个（曾经就漏出过空白的定位行）。 */
+function refresh() {
+  renderLocateLine();
+  render();
+}
+
+function renderLocateLine() {
+  const loc = document.getElementById("locate");
+  const links = "<a href='#' data-act='retry'>重新定位</a><a href='#' data-act='all'>查看全部</a>";
+  let html = "";
+  if (PRESET_NAME) {
+    const how = LOCATE_HOW === "browser" ? "定位" : "IP 粗略定位";
+    const hit = findProvince(PRESET_NAME);
+    const tail = SNAP && !hit ? "，该地区暂无油价数据" : "";
+    html = "已按" + how + "选中 <b>" + PRESET_NAME + "</b> 的油价" + tail + links;
+  } else if (LOCATE_HOW === "failed") {
+    html = "未能自动定位，请手动选择省份" + links;
+    if (!window.isSecureContext) {
+      html += "<br/>（精确自动定位需要 HTTPS，当前页面是 HTTP，浏览器不允许申请定位权限）";
+    }
+  }
+  loc.innerHTML = html;
+  loc.querySelectorAll("a[data-act]").forEach((a) => {
+    a.onclick = (e) => {
+      e.preventDefault();
+      if (a.dataset.act === "all") {
+        MANUAL = true; PRESET_NAME = null; LOCATE_HOW = null;
+        document.getElementById("provinceSel").value = "";
+        refresh();
+      } else {
+        MANUAL = false; PRESET_NAME = null; LOCATE_HOW = null;
+        document.getElementById("provinceSel").value = "";
+        refresh();
+        locateByIp().then(upgradeWithBrowserGeo);
+      }
+    };
+  });
+}
+
+/* --- 渲染 ---------------------------------------------------------------- */
+
+function render() {
+  const el = (id) => document.getElementById(id);
+  if (!SNAP) return;
+  const snap = SNAP;
 
   el("updated").textContent = "更新时间：" + (snap.generated_at || "").replace("T", " ");
-  for (const p of Object.values(snap.provinces || {})) PROVINCES_CACHE[p.slug] = p;
 
   const f = snap.forecast || {};
   const self = f.self;
@@ -158,10 +233,11 @@ async function load() {
     el("fcConsist").innerHTML = "<span class='pill " +
       (c === true ? "ok" : c === false ? "warn" : "") + "'>" +
       (c === true ? "与网站一致" : c === false ? "与网站不一致" : "无法判定") + "</span>";
-    el("fc92").textContent = signed(self.yuan_per_liter["92"]);
-    el("fc95").textContent = signed(self.yuan_per_liter["95"]);
-    el("fc98").textContent = signed(self.yuan_per_liter["98"]);
-    el("fc0").textContent = signed(self.yuan_per_liter["0"]);
+    const ypl = self.yuan_per_liter || {};
+    el("fc92").textContent = signed(ypl["92"]);
+    el("fc95").textContent = signed(ypl["95"]);
+    el("fc98").textContent = signed(ypl["98"]);
+    el("fc0").textContent = signed(ypl["0"]);
     el("fcNotes").innerHTML = (f.notes || [])
       .map((n) => "<div class='note'>⚠ " + n + "</div>").join("");
   }
@@ -175,25 +251,25 @@ async function load() {
   }
 
   const provinces = Object.values(snap.provinces || {});
-  const sel = el("provinceSel");
   provinces.sort((a, b) => (a.region > b.region ? 1 : a.region < b.region ? -1 : 0));
-  const built = sel.options.length > 1;
-  if (!built) {
+
+  const sel = el("provinceSel");
+  if (sel.options.length <= 1) {
     for (const p of provinces) {
       const o = document.createElement("option");
       o.value = p.slug; o.textContent = p.name;
       sel.appendChild(o);
     }
   }
-  // 自动定位：优先选中定位到的省份
-  if (PRESET && !built) sel.value = PRESET;
+  const hit = PRESET_NAME ? findProvince(PRESET_NAME) : null;
+  if (!MANUAL) sel.value = hit ? hit.slug : "";
   const selVal = sel.value;
 
   let lastRegion = null;
   const body = el("priceBody");
   body.innerHTML = "";
   for (const p of provinces) {
-    if (selVal && p.slug !== selVal && p.name !== selVal) continue;
+    if (selVal && p.slug !== selVal) continue;
     if (p.region !== lastRegion) {
       const hr = document.createElement("tr");
       hr.innerHTML = "<td class='region-h' colspan='5'>" + p.region + "</td>";
@@ -202,12 +278,36 @@ async function load() {
     }
     const tr = document.createElement("tr");
     const pr = p.prices || {};
+    if (selVal && p.slug === selVal) tr.className = "mine";
     tr.innerHTML = "<td>" + p.name + "</td><td>" + fmt(pr["92"]) +
       "</td><td>" + fmt(pr["95"]) + "</td><td>" + fmt(pr["98"]) +
       "</td><td>" + fmt(pr["0"]) + "</td>";
     body.appendChild(tr);
   }
-  sel.onchange = () => { PRESET = null; document.getElementById("locate").innerHTML = ""; load(); };
+  sel.onchange = () => { MANUAL = true; PRESET_NAME = null; refresh(); };
+}
+
+async function load() {
+  try {
+    const r = await fetch("/api/snapshot");
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    SNAP = await r.json();
+  } catch (e) {
+    document.getElementById("updated").innerHTML =
+      '<span class="err">加载失败：' + e.message + '</span>';
+    return;
+  }
+  render();
+}
+
+/* --- 启动 ---------------------------------------------------------------- */
+
+async function boot() {
+  // IP 定位与快照并行取，两个都回来了再渲染一次 —— 避免「先渲染全部省份、
+  // 定位结果到了再跳成某个省」的闪烁。浏览器定位较慢（最多 8s），不阻塞首屏。
+  await Promise.all([load(), locateByIp()]);
+  refresh();
+  upgradeWithBrowserGeo();
 }
 
 // Service Worker：注册后可"添加到主屏幕"并离线看壳（需 HTTPS 或 localhost）
@@ -215,7 +315,7 @@ if ("serviceWorker" in navigator) {
   navigator.serviceWorker.register("/static/sw.js").catch(() => {});
 }
 
-locate().finally(load);
+boot();
 setInterval(load, 5 * 60 * 1000); // 每 5 分钟刷新页面缓存展示
 </script>
 </body>

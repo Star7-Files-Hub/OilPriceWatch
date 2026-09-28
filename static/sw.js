@@ -1,12 +1,16 @@
 /* OilPriceWatch Service Worker：让 H5 可"添加到主屏幕"且能离线看壳。 */
-const CACHE = "oilwatch-v1";
+const CACHE = "oilwatch-v2";
 const SHELL = [
   "/",
   "/static/index.html",
   "/static/manifest.webmanifest",
   "/static/icon.svg",
   "/static/icon-192.png",
-  "/static/icon-512.png"
+  "/static/icon-512.png",
+  // 定位相关：静态资源分支是「缓存优先、不写回」，没列进来就永远不会被缓存。
+  // 边界数据 54KB，不缓存的话每次打开都要重新下载。
+  "/static/provinces.js",
+  "/static/geo.js"
 ];
 
 self.addEventListener("install", (event) => {
