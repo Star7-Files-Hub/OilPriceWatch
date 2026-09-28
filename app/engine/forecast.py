@@ -6,6 +6,7 @@
 
 ⚠️ 已知偏差来源：新浪没有迪拜、米纳斯原油，只能用布伦特 + WTI 近似三地均价。
    这正是必须做交叉验证的原因——自算值和网站预测值偏差过大时应当告警而非静默。
+   网站只给「元/升」时按 92# 吨升比折回「元/吨」再比，见 site_yuan_per_ton()。
 """
 from __future__ import annotations
 
@@ -96,6 +97,46 @@ def to_yuan_per_liter(yuan_per_ton: float, fuel: str) -> float:
     return yuan_per_ton / liters
 
 
+def site_yuan_per_ton(site_forecast: dict | None) -> tuple[float | None, str | None]:
+    """把网站预测的幅度统一折算成元/吨，返回 ``(幅度, 来源)``。
+
+    来源取值：
+
+    - ``"site"``    —— 网站直接给了元/吨
+    - ``"derived"`` —— 网站只给了元/升区间，按 ``config.SITE_FORECAST_FUEL``
+                       的吨升比取中值折算回元/吨
+    - ``None``      —— 两种都没有（或幅度为 0），无法比对
+
+    🔴 别退化成"拿不到就按 0 处理"。网站 2026-09 起文案改成只给元/升
+    （「目前预计上涨0.30元/升-0.36元/升」），老代码在这里取 ``or 0.0`` ⇒
+    ``site_ton = 0`` ⇒ ``deviation = None`` ⇒ ``consistent`` 退化成"只看方向"，
+    而 UI 照样显示「与网站一致」——**幅度交叉验证被静默关掉**。
+    """
+    if not site_forecast:
+        return None, None
+
+    direct = site_forecast.get("yuan_per_ton")
+    if direct:
+        return float(direct), "site"
+
+    liters = config.LITERS_PER_TON.get(config.SITE_FORECAST_FUEL)
+    if not liters:
+        return None, None
+    low = site_forecast.get("yuan_per_liter_min")
+    high = site_forecast.get("yuan_per_liter_max")
+    if low is not None and high is not None:
+        per_liter = (low + high) / 2
+    elif low is not None:
+        per_liter = low
+    elif high is not None:
+        per_liter = high
+    else:
+        return None, None
+    if not per_liter:
+        return None, None
+    return per_liter * liters, "derived"
+
+
 def build_forecast(
     klines_by_symbol: dict[str, list[dict]],
     site_forecast: dict | None = None,
@@ -115,6 +156,8 @@ def build_forecast(
         "coefficient_used": config.YIELD_COEFFICIENT,
         "self": None,
         "site": site_forecast,
+        "site_yuan_per_ton": None,
+        "site_yuan_per_ton_source": None,
         "implied_coefficient": None,
         "consistent": None,
         "notes": [],
@@ -147,26 +190,35 @@ def build_forecast(
         ),
     }
 
-    if site_forecast and site_forecast.get("yuan_per_ton") and weighted:
-        result["implied_coefficient"] = round(
-            site_forecast["yuan_per_ton"] / (weighted * 100), 1
-        )
+    # --- 与网站预测交叉验证 ------------------------------------------------
+    # ⚠️🔴 网站文案改过：早期直接给「元/吨」，现在只给「元/升」区间。
+    #     只给元/升时**必须折回元/吨**，否则幅度比对会被静默跳过（详见
+    #     site_yuan_per_ton 的说明）。这个项目的立身之本就是交叉验证，
+    #     宁可标成"无法判定"，也不能让它悄悄降级成"只看方向"。
+    site_ton, site_source = site_yuan_per_ton(site_forecast)
+    result["site_yuan_per_ton"] = round(site_ton, 1) if site_ton is not None else None
+    result["site_yuan_per_ton_source"] = site_source
 
-    if site_forecast and site_forecast.get("direction"):
-        same_direction = site_forecast["direction"] == result["self"]["direction"]
-        site_ton = site_forecast.get("yuan_per_ton") or 0.0
-        deviation = (
-            abs(result["self"]["yuan_per_ton"] - site_ton) / site_ton
-            if site_ton
-            else None
-        )
-        result["deviation"] = round(deviation, 3) if deviation is not None else None
-        result["consistent"] = bool(same_direction and (deviation or 0) < 0.5)
+    site_direction = (site_forecast or {}).get("direction")
+    if site_direction:
+        same_direction = site_direction == result["self"]["direction"]
         if not same_direction:
+            # 方向相反时算出来的"隐含系数"是负数，没有校准意义，不如不给
+            result["consistent"] = False
             result["notes"].append("方向与网站预测相反，需人工核查")
-        elif deviation is not None and deviation >= 0.5:
-            result["notes"].append(
-                f"幅度偏差 {deviation:.0%}，系数 {config.YIELD_COEFFICIENT} 可能需校准"
-            )
+        elif site_ton is None:
+            # 只有方向、没有幅度 ⇒ 只能判方向，如实标成"无法判定"而不是"一致"
+            result["consistent"] = None
+            result["notes"].append("网站未给出幅度，只能比对方向（方向一致）")
+        else:
+            deviation = abs(result["self"]["yuan_per_ton"] - site_ton) / abs(site_ton)
+            result["deviation"] = round(deviation, 3)
+            result["consistent"] = deviation < 0.5
+            if weighted:
+                result["implied_coefficient"] = round(site_ton / (weighted * 100), 1)
+            if deviation >= 0.5:
+                result["notes"].append(
+                    f"幅度偏差 {deviation:.0%}，系数 {config.YIELD_COEFFICIENT} 可能需校准"
+                )
 
     return result

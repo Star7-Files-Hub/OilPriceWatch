@@ -75,11 +75,17 @@ def render(data: dict) -> str:
         liters = ""
         if site.get("yuan_per_liter_min") is not None:
             liters = f"{site['yuan_per_liter_min']}-{site['yuan_per_liter_max']} 元/升"
-        if site.get("yuan_per_ton") is not None:
-            add(f"  网站预测    {site['direction']} {site['yuan_per_ton']:.0f} 元/吨  ({liters})")
+        # 网站只给元/升时由引擎折算成元/吨（见 forecast.site_yuan_per_ton），
+        # 这里只负责显示，并标明是折算值而不是网站原文。
+        # ⚠️ 该字段是后加的，旧快照没有 ⇒ 回退到网站原文的元/吨。
+        ton = fcst.get("site_yuan_per_ton")
+        if ton is None:
+            ton = site.get("yuan_per_ton")
+        if ton is not None:
+            mark = "（折算）" if fcst.get("site_yuan_per_ton_source") == "derived" else ""
+            add(f"  网站预测    {site['direction']} {ton:.0f} 元/吨{mark}  ({liters})")
         else:
-            # 站点只给元/升时（新文案），没有元/吨可显示
-            add(f"  网站预测    {site['direction']} {liters}")
+            add(f"  网站预测    {site['direction']} {liters}（未给幅度）")
     else:
         add("  网站预测    未取到")
 

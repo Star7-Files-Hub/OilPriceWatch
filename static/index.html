@@ -82,6 +82,7 @@
       <div class="cell"><div class="k">98# 元/升</div><div class="v" id="fc98">—</div></div>
       <div class="cell"><div class="k">0# 元/升</div><div class="v" id="fc0">—</div></div>
     </div>
+    <div class="row" id="fcSite" style="display:none;"></div>
     <div id="fcNotes"></div>
     <div id="windowBox" style="display:none; margin-top:12px;">
       <div class="row"><span id="wText"></span><span id="wRemain"></span></div>
@@ -238,6 +239,21 @@ function render() {
     el("fc95").textContent = signed(ypl["95"]);
     el("fc98").textContent = signed(ypl["98"]);
     el("fc0").textContent = signed(ypl["0"]);
+
+    // 网站预测的幅度：只给元/升时由后端折成元/吨（site_yuan_per_ton_source=derived），
+    // 折算值要标明，别让用户以为网站原文写的就是元/吨。
+    const site = f.site || {};
+    const siteTon = f.site_yuan_per_ton;
+    let siteTxt = "";
+    if (site.direction && siteTon != null) {
+      siteTxt = "网站预测 " + site.direction + " " + siteTon.toFixed(0) + " 元/吨" +
+        (f.site_yuan_per_ton_source === "derived" ? "（由元/升折算）" : "");
+    } else if (site.direction) {
+      siteTxt = "网站预测 " + site.direction + "（未给幅度）";
+    }
+    el("fcSite").textContent = siteTxt;
+    el("fcSite").style.display = siteTxt ? "" : "none";
+
     el("fcNotes").innerHTML = (f.notes || [])
       .map((n) => "<div class='note'>⚠ " + n + "</div>").join("");
   }

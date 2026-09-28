@@ -116,6 +116,93 @@ class TestBuildForecast(unittest.TestCase):
         self.assertTrue(result["notes"])
 
 
+class TestSiteForecastUnitConversion(unittest.TestCase):
+    """回归：网站只给「元/升」时，幅度交叉验证不能被静默跳过。
+
+    2026-09 网站文案改成「目前预计上涨0.30元/升-0.36元/升」，`yuan_per_ton` 变 null。
+    老代码在 build_forecast 里取 `site_forecast.get("yuan_per_ton") or 0.0`
+    ⇒ site_ton = 0 ⇒ deviation = None ⇒ consistent 退化成"只看方向"，
+    而 UI 照样显示「与网站一致」——**幅度比对和 implied_coefficient 一起静默失效**。
+    """
+
+    RISING = {
+        "brent": make_klines(list(range(100, 120))),
+        "wti": make_klines(list(range(100, 120))),
+    }
+
+    def test_helper_derives_from_range_midpoint(self):
+        ton, source = fc.site_yuan_per_ton(
+            {"direction": "上调", "yuan_per_liter_min": 0.30, "yuan_per_liter_max": 0.36}
+        )
+        self.assertEqual(source, "derived")
+        self.assertAlmostEqual(ton, 0.33 * config.LITERS_PER_TON["92"], places=6)
+
+    def test_helper_prefers_direct_per_ton(self):
+        ton, source = fc.site_yuan_per_ton(
+            {"yuan_per_ton": 635.0, "yuan_per_liter_min": 0.1, "yuan_per_liter_max": 0.2}
+        )
+        self.assertEqual((ton, source), (635.0, "site"))
+
+    def test_helper_returns_none_without_usable_magnitude(self):
+        self.assertEqual(fc.site_yuan_per_ton({"direction": "上调"}), (None, None))
+        self.assertEqual(fc.site_yuan_per_ton(None), (None, None))
+        # 幅度 0 也当作"拿不到"：避免除零，也避免把"0 元/吨"当成比对基准
+        self.assertEqual(
+            fc.site_yuan_per_ton(
+                {"yuan_per_liter_min": 0.0, "yuan_per_liter_max": 0.0}
+            ),
+            (None, None),
+        )
+
+    def test_per_liter_only_still_yields_deviation_and_coefficient(self):
+        site = {
+            "direction": "上调",
+            "yuan_per_ton": None,
+            "yuan_per_liter_min": 0.30,
+            "yuan_per_liter_max": 0.36,
+        }
+        result = fc.build_forecast(self.RISING, site)
+        self.assertEqual(result["site_yuan_per_ton_source"], "derived")
+        self.assertAlmostEqual(result["site_yuan_per_ton"], 445.8, places=1)
+        # 🔴 老代码这里 deviation 是 None —— 就是被静默跳过的证据
+        self.assertIsNotNone(result["deviation"])
+        self.assertLess(result["deviation"], 0.5)
+        self.assertTrue(result["consistent"])
+        # 隐含系数也得跟着活过来（校准 YIELD_COEFFICIENT 全靠它）
+        self.assertAlmostEqual(result["implied_coefficient"], 46.6, places=1)
+
+    def test_per_liter_only_magnitude_mismatch_is_flagged(self):
+        site = {
+            "direction": "上调",
+            "yuan_per_liter_min": 0.10,
+            "yuan_per_liter_max": 0.12,
+        }
+        result = fc.build_forecast(self.RISING, site)
+        self.assertFalse(result["consistent"])
+        self.assertGreaterEqual(result["deviation"], 0.5)
+        self.assertTrue(any("幅度偏差" in n for n in result["notes"]))
+
+    def test_per_liter_only_direction_conflict_is_flagged(self):
+        site = {
+            "direction": "下调",
+            "yuan_per_liter_min": 0.30,
+            "yuan_per_liter_max": 0.36,
+        }
+        result = fc.build_forecast(self.RISING, site)
+        self.assertFalse(result["consistent"])
+        self.assertTrue(any("方向" in n for n in result["notes"]))
+        # 方向相反时算出来的"隐含系数"是负数，没有校准意义 ⇒ 宁可不给
+        self.assertIsNone(result["implied_coefficient"])
+
+    def test_missing_magnitude_is_unknown_not_consistent(self):
+        result = fc.build_forecast(self.RISING, {"direction": "上调"})
+        self.assertIsNone(result["site_yuan_per_ton"])
+        self.assertIsNone(result["site_yuan_per_ton_source"])
+        # 只能比方向时必须如实说"无法判定"，不能冒充"已校验一致"
+        self.assertIsNone(result["consistent"])
+        self.assertTrue(any("幅度" in n for n in result["notes"]))
+
+
 class TestHolidayCalendar(unittest.TestCase):
     def test_make_up_workday_is_workday(self):
         # 2026-01-04 是周日，但属元旦调休补班 -> 必须算工作日

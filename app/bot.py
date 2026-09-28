@@ -229,8 +229,15 @@ def build_digest(snapshot: dict) -> str:
             f"折合 92# {selfd['yuan_per_liter']['92']:+.3f} 元/升"
         )
     if site:
-        if site.get("yuan_per_ton") is not None:
-            lines.append(f"网站预测：{site['direction']} {site['yuan_per_ton']:.0f} 元/吨")
+        # 网站只给元/升时由引擎折算成元/吨（见 forecast.site_yuan_per_ton）。
+        # ⚠️ `site_yuan_per_ton` 是后加的字段，数据库里的旧快照没有它
+        #    ⇒ 回退到网站原文的元/吨，别让老快照的推送少一行。
+        ton = f.get("site_yuan_per_ton")
+        if ton is None:
+            ton = site.get("yuan_per_ton")
+        if ton is not None:
+            mark = "（折算）" if f.get("site_yuan_per_ton_source") == "derived" else ""
+            lines.append(f"网站预测：{site['direction']} {ton:.0f} 元/吨{mark}")
         elif site.get("yuan_per_liter_min") is not None:
             lines.append(
                 f"网站预测：{site['direction']} "

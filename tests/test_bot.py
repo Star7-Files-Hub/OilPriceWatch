@@ -29,6 +29,8 @@ class TestBuildDigest(unittest.TestCase):
                     "yuan_per_liter": {"92": 0.45, "95": 0.448, "0": 0.514},
                 },
                 "site": {"direction": "上调", "yuan_per_ton": 635.0},
+                "site_yuan_per_ton": 635.0,
+                "site_yuan_per_ton_source": "site",
             },
             "window": {
                 "next_date": "2026-09-23",
@@ -41,6 +43,45 @@ class TestBuildDigest(unittest.TestCase):
         self.assertIn("635", text)  # 网站预测值
         self.assertIn("2026-09-23", text)
         self.assertIn("2 个工作日", text)
+        self.assertNotIn("折算", text)  # 网站原文就是元/吨，不该标成折算
+
+    def test_digest_marks_derived_site_value(self):
+        """网站只给元/升时，引擎折出来的元/吨必须标明是折算值，不能冒充原文。"""
+        snap = {
+            "forecast": {
+                "self": {
+                    "direction": "上调",
+                    "yuan_per_ton": 478.5,
+                    "yuan_per_liter": {"92": 0.354},
+                },
+                "site": {
+                    "direction": "上调",
+                    "yuan_per_ton": None,
+                    "yuan_per_liter_min": 0.30,
+                    "yuan_per_liter_max": 0.36,
+                },
+                "site_yuan_per_ton": 445.8,
+                "site_yuan_per_ton_source": "derived",
+            },
+        }
+        text = bot.build_digest(snap)
+        self.assertIn("446", text)
+        self.assertIn("折算", text)
+
+    def test_digest_tolerates_old_snapshot_without_new_fields(self):
+        """兼容旧快照：`site_yuan_per_ton` 是后加字段，缺失时要回退到网站原文。"""
+        snap = {
+            "forecast": {
+                "self": {
+                    "direction": "上调",
+                    "yuan_per_ton": 607.9,
+                    "yuan_per_liter": {"92": 0.45},
+                },
+                "site": {"direction": "上调", "yuan_per_ton": 635.0},
+            },
+        }
+        text = bot.build_digest(snap)
+        self.assertIn("635", text)
 
 
 class TestSharedClient(unittest.TestCase):
