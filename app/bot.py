@@ -28,6 +28,31 @@ logger = logging.getLogger("oilwatch.bot")
 
 _API = "https://api.telegram.org/bot{token}/{method}"
 
+# --- 共享 HTTP 连接池（关键性能点）----------------------------------------
+# ⚠️ 之前每次调用都 `with httpx.Client(...)` 新建客户端，代价是**每次都要重做一遍
+#    TCP + TLS 握手**（实测服务器→api.telegram.org 新建连接 ~0.5s，复用 ~0.15s）。
+#    后果有两个：
+#    1. 每条回复的 sendMessage 白等 ~0.4s；
+#    2. 更糟的是 getUpdates 每轮都换新连接，握手那 ~0.4s 里**根本没在收消息**，
+#       用户恰好在那个窗口发消息就得多等一轮（再叠加 0.3s sleep）。
+#    httpx.Client 官方保证线程安全，可以全局复用一个。按请求传 timeout 即可。
+_client_lock = threading.Lock()
+_client: httpx.Client | None = None
+
+
+def _client_get() -> httpx.Client:
+    global _client
+    with _client_lock:
+        if _client is None or _client.is_closed:
+            _client = httpx.Client(
+                proxy=net.proxy_url(),
+                verify=net.tls_verify(),
+                timeout=40,
+                limits=httpx.Limits(max_connections=8, max_keepalive_connections=4),
+                headers={"Connection": "keep-alive"},
+            )
+        return _client
+
 
 def get_token() -> str | None:
     return os.environ.get("OILWATCH_TG_BOT_TOKEN")
@@ -41,18 +66,37 @@ def get_webhook_secret() -> str | None:
     return os.environ.get("OILWATCH_TG_WEBHOOK_SECRET")
 
 
-def _post(token: str, method: str, payload: dict, timeout: float = 10) -> dict | None:
+def _post(
+    token: str,
+    method: str,
+    payload: dict,
+    timeout: float = 10,
+    *,
+    retry_transport: bool = False,
+) -> dict | None:
+    """调一次 Bot API。
+
+    retry_transport：复用的 keep-alive 连接可能已被对端半关（长轮询连接尤其常见），
+    这种 TransportError 立刻换连接重试一次即可。**只对幂等的 getUpdates 开**——
+    sendMessage 若在响应阶段超时，重试会重复发一条，宁可丢一次也不重复。
+    """
     url = _API.format(token=token, method=method)
-    try:
-        with httpx.Client(
-            proxy=net.proxy_url(), verify=net.tls_verify(), timeout=timeout
-        ) as client:
-            resp = client.post(url, json=payload)
+    started = time.monotonic()
+    last_exc: Exception | None = None
+    for attempt in range(2):
+        try:
+            resp = _client_get().post(url, json=payload, timeout=timeout)
             resp.raise_for_status()
             return resp.json()
-    except Exception as exc:  # noqa: BLE001 - Telegram 偶尔抖动，失败就记一笔
-        logger.warning("TG %s 失败: %s", method, exc)
-        return None
+        except Exception as exc:  # noqa: BLE001 - Telegram 偶尔抖动，失败就记一笔
+            last_exc = exc
+            if retry_transport and attempt == 0 and isinstance(exc, httpx.TransportError):
+                continue
+            break
+    logger.warning(
+        "TG %s 失败(耗时 %.2fs): %s", method, time.monotonic() - started, last_exc
+    )
+    return None
 
 
 def send_message(chat_id, text: str, parse_mode: str = "HTML") -> dict | None:
@@ -157,9 +201,14 @@ def dispatch_update(update: dict) -> None:
     text = (message.get("text") or "").strip()
     if chat_id is None or not text:
         return
+    t0 = time.monotonic()
+    logger.info("收到消息 chat=%s text=%r", chat_id, text[:30])
     reply = handle_text(chat_id, text)
     if reply:
         send_message(chat_id, reply)
+    logger.info(
+        "已回复 chat=%s 端到端 %.3fs（含发送）", chat_id, time.monotonic() - t0
+    )
 
 
 # --- 推送 ---------------------------------------------------------------
@@ -265,14 +314,24 @@ def _poll_loop(token: str, stop: threading.Event) -> None:
     while not stop.is_set():
         # ⚠️ 客户端超时必须 > 长轮询 timeout(30)，否则每轮都在服务端还没返回时
         #    先 read timeout，导致更新永远收不到（实测 10s 默认超时必炸）。
-        resp = _post(token, "getUpdates", {"offset": offset, "timeout": 30}, timeout=40)
+        resp = _post(
+            token,
+            "getUpdates",
+            {"offset": offset, "timeout": 30},
+            timeout=40,
+            retry_transport=True,
+        )
         if not resp or not resp.get("ok"):
             time.sleep(2)
             continue
-        for u in resp.get("result", []):
+        updates = resp.get("result", [])
+        if updates:
+            logger.info("getUpdates 取到 %d 条更新", len(updates))
+        for u in updates:
             offset = u["update_id"] + 1
             try:
                 dispatch_update(u)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("处理更新失败: %s", exc)
-        time.sleep(0.3)
+        # 复用连接后这个间隔只为让出 GIL / 防止空转，不需要再靠它兜握手时间。
+        time.sleep(0.05)

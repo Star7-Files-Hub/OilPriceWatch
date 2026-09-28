@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
 from pathlib import Path
+from typing import Iterator
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "oilwatch.db"
 _lock = threading.Lock()
@@ -29,8 +31,31 @@ def _conn() -> sqlite3.Connection:
     return conn
 
 
+@contextmanager
+def _session(write: bool = False) -> Iterator[sqlite3.Connection]:
+    """一次完整的 DB 会话：拿连接 → 提交/回滚 → **关连接**。
+
+    ⚠️ 这里必须显式 close。`with sqlite3.connect(...) as conn` 只管理事务
+    （退出时 commit/rollback），**不会关连接**，之前每个函数都这么写，
+    于是每次调用都泄漏一个连接，全靠 GC 兜底。
+    写操作串行化（`_lock`），读操作走 WAL 并发读，不需要抢锁。
+    """
+    if write:
+        _lock.acquire()
+    try:
+        conn = _conn()
+        try:
+            with conn:
+                yield conn
+        finally:
+            conn.close()
+    finally:
+        if write:
+            _lock.release()
+
+
 def init() -> None:
-    with _lock, _conn() as conn:
+    with _session(write=True) as conn:
         conn.execute(
             """CREATE TABLE IF NOT EXISTS snapshots (
                    id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -54,7 +79,7 @@ def init() -> None:
 
 
 def save_snapshot(payload: dict) -> None:
-    with _lock, _conn() as conn:
+    with _session(write=True) as conn:
         conn.execute(
             "INSERT INTO snapshots(generated_at, payload) VALUES (?, ?)",
             (payload.get("generated_at"), json.dumps(payload, ensure_ascii=False)),
@@ -62,7 +87,7 @@ def save_snapshot(payload: dict) -> None:
 
 
 def latest() -> dict | None:
-    with _conn() as conn:
+    with _session() as conn:
         row = conn.execute(
             "SELECT payload FROM snapshots ORDER BY id DESC LIMIT 1"
         ).fetchone()
@@ -70,7 +95,7 @@ def latest() -> dict | None:
 
 
 def recent(limit: int = 30) -> list[dict]:
-    with _conn() as conn:
+    with _session() as conn:
         rows = conn.execute(
             "SELECT generated_at, payload FROM snapshots ORDER BY id DESC LIMIT ?",
             (limit,),
@@ -79,7 +104,7 @@ def recent(limit: int = 30) -> list[dict]:
 
 
 def get_setting(key: str, default: str | None = None) -> str | None:
-    with _conn() as conn:
+    with _session() as conn:
         row = conn.execute(
             "SELECT value FROM settings WHERE key = ?", (key,)
         ).fetchone()
@@ -87,7 +112,7 @@ def get_setting(key: str, default: str | None = None) -> str | None:
 
 
 def set_setting(key: str, value: str) -> None:
-    with _lock, _conn() as conn:
+    with _session(write=True) as conn:
         conn.execute(
             "INSERT INTO settings(key, value) VALUES (?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
@@ -99,7 +124,7 @@ def set_setting(key: str, value: str) -> None:
 
 
 def add_subscriber(chat_id: str, province_slug: str | None = None) -> None:
-    with _lock, _conn() as conn:
+    with _session(write=True) as conn:
         conn.execute(
             "INSERT INTO subscribers(chat_id, province_slug) VALUES (?, ?) "
             "ON CONFLICT(chat_id) DO UPDATE SET province_slug = excluded.province_slug",
@@ -108,7 +133,7 @@ def add_subscriber(chat_id: str, province_slug: str | None = None) -> None:
 
 
 def set_subscriber_province(chat_id: str, province_slug: str | None) -> None:
-    with _lock, _conn() as conn:
+    with _session(write=True) as conn:
         conn.execute(
             "UPDATE subscribers SET province_slug = ? WHERE chat_id = ?",
             (province_slug, str(chat_id)),
@@ -116,12 +141,12 @@ def set_subscriber_province(chat_id: str, province_slug: str | None) -> None:
 
 
 def remove_subscriber(chat_id: str) -> None:
-    with _lock, _conn() as conn:
+    with _session(write=True) as conn:
         conn.execute("DELETE FROM subscribers WHERE chat_id = ?", (str(chat_id),))
 
 
 def list_subscribers() -> list[dict]:
-    with _conn() as conn:
+    with _session() as conn:
         rows = conn.execute(
             "SELECT chat_id, province_slug FROM subscribers"
         ).fetchall()
@@ -129,5 +154,5 @@ def list_subscribers() -> list[dict]:
 
 
 def subscriber_count() -> int:
-    with _conn() as conn:
+    with _session() as conn:
         return conn.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0]
