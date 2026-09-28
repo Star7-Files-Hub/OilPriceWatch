@@ -57,6 +57,28 @@ class TestPriceParsing(unittest.TestCase):
         p = qy.parse_province(html, ZJ)
         self.assertFalse(p["complete"])
 
+    def test_98_parsed(self):
+        html = (
+            "<div>92#汽油</div><div>8.58</div>"
+            "<div>95#汽油</div><div>9.12</div>"
+            "<div>98#汽油</div><div>10.62</div>"
+            "<div>0#柴油</div><div>8.28</div>"
+        )
+        p = qy.parse_province(html, ZJ)
+        self.assertEqual(p["prices"]["98"], 10.62)
+        self.assertTrue(p["complete"])
+
+    def test_missing_98_still_complete(self):
+        # 98# 不是必需油品，缺了不影响 complete（否则覆盖率会被拖垮）
+        html = (
+            "<div>92#汽油</div><div>8.58</div>"
+            "<div>95#汽油</div><div>9.12</div>"
+            "<div>0#柴油</div><div>8.28</div>"
+        )
+        p = qy.parse_province(html, ZJ)
+        self.assertIsNone(p["prices"]["98"])
+        self.assertTrue(p["complete"])
+
 
 if __name__ == "__main__":
     unittest.main()

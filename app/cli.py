@@ -127,9 +127,11 @@ def render(data: dict) -> str:
         if prices.get("92") is None:
             add(f"  {province.name:5s} 数据缺失" + (f"  ({item.get('error', '')[:40]})" if item.get("error") else ""))
             continue
+        p98 = prices.get("98")
+        p98s = f"{p98:.2f}" if p98 is not None else " —  "
         add(
             f"  {province.name:5s} 92# {prices['92']:.2f}   "
-            f"95# {prices['95']:.2f}   0# {prices['0']:.2f}"
+            f"95# {prices['95']:.2f}   98# {p98s}   0# {prices['0']:.2f}"
         )
 
     add("")

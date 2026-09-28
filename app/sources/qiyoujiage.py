@@ -69,7 +69,8 @@ def parse_province(html: str, province: config.Province) -> dict:
         "region": province.region,
         "prices": prices,
         "forecast": _find_forecast(lines),
-        "complete": all(v is not None for v in prices.values()),
+        # 只看必需油品；98# 缺失不算不完整（部分省份本就不供 98#）
+        "complete": all(prices.get(f) is not None for f in config.REQUIRED_FUELS),
     }
 
 

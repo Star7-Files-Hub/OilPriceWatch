@@ -40,7 +40,7 @@
   }
   .pill.ok { color: var(--down); border-color: var(--down); }
   .pill.warn { color: #ffcc4d; border-color: #ffcc4d; }
-  .grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin-top: 10px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(72px, 1fr)); gap: 10px; margin-top: 10px; }
   .cell { background: #11141a; border-radius: 8px; padding: 10px; text-align: center; }
   .cell .k { font-size: 11px; color: var(--muted); }
   .cell .v { font-size: 18px; font-weight: 600; margin-top: 4px; }
@@ -77,6 +77,7 @@
     <div class="grid">
       <div class="cell"><div class="k">92# 元/升</div><div class="v" id="fc92">—</div></div>
       <div class="cell"><div class="k">95# 元/升</div><div class="v" id="fc95">—</div></div>
+      <div class="cell"><div class="k">98# 元/升</div><div class="v" id="fc98">—</div></div>
       <div class="cell"><div class="k">0# 元/升</div><div class="v" id="fc0">—</div></div>
     </div>
     <div id="fcNotes"></div>
@@ -90,7 +91,7 @@
 
   <div class="card" style="padding:0;">
     <table id="priceTable">
-      <thead><tr><th>省份</th><th>92#</th><th>95#</th><th>0#柴油</th></tr></thead>
+      <thead><tr><th>省份</th><th>92#</th><th>95#</th><th>98#</th><th>0#柴油</th></tr></thead>
       <tbody id="priceBody"></tbody>
     </table>
   </div>
@@ -159,6 +160,7 @@ async function load() {
       (c === true ? "与网站一致" : c === false ? "与网站不一致" : "无法判定") + "</span>";
     el("fc92").textContent = signed(self.yuan_per_liter["92"]);
     el("fc95").textContent = signed(self.yuan_per_liter["95"]);
+    el("fc98").textContent = signed(self.yuan_per_liter["98"]);
     el("fc0").textContent = signed(self.yuan_per_liter["0"]);
     el("fcNotes").innerHTML = (f.notes || [])
       .map((n) => "<div class='note'>⚠ " + n + "</div>").join("");
@@ -194,14 +196,15 @@ async function load() {
     if (selVal && p.slug !== selVal && p.name !== selVal) continue;
     if (p.region !== lastRegion) {
       const hr = document.createElement("tr");
-      hr.innerHTML = "<td class='region-h' colspan='4'>" + p.region + "</td>";
+      hr.innerHTML = "<td class='region-h' colspan='5'>" + p.region + "</td>";
       body.appendChild(hr);
       lastRegion = p.region;
     }
     const tr = document.createElement("tr");
     const pr = p.prices || {};
     tr.innerHTML = "<td>" + p.name + "</td><td>" + fmt(pr["92"]) +
-      "</td><td>" + fmt(pr["95"]) + "</td><td>" + fmt(pr["0"]) + "</td>";
+      "</td><td>" + fmt(pr["95"]) + "</td><td>" + fmt(pr["98"]) +
+      "</td><td>" + fmt(pr["0"]) + "</td>";
     body.appendChild(tr);
   }
   sel.onchange = () => { PRESET = null; document.getElementById("locate").innerHTML = ""; load(); };

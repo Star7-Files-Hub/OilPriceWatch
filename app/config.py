@@ -91,9 +91,11 @@ CYCLE_WORKDAYS = 10
 MIN_ADJUST_YUAN_PER_TON = 50.0
 
 # 吨 → 升。用于把"元/吨"折算成用户看得懂的"元/升"。
+# 98# 是近似值（密度与 95# 接近），仅影响折算展示，不影响调价幅度计算。
 LITERS_PER_TON: dict[str, float] = {
     "92": 1351.0,
     "95": 1357.0,
+    "98": 1360.0,
     "0": 1183.0,
 }
 
@@ -108,8 +110,13 @@ YIELD_COEFFICIENT = 50.0
 FUEL_LABELS: dict[str, str] = {
     "92#汽油": "92",
     "95#汽油": "95",
+    "98#汽油": "98",
     "0#柴油": "0",
 }
+
+# 「数据完整」判定只看这几个——98# 并非所有省份都供应（部分偏远省份页面无此价），
+# 不能算进 complete，否则覆盖率会被 98# 缺失拖垮。
+REQUIRED_FUELS: tuple[str, ...] = ("92", "95", "0")
 
 REQUEST_TIMEOUT = 20.0
 REQUEST_RETRIES = 3

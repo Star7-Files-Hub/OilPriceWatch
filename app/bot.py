@@ -207,9 +207,11 @@ def broadcast(text: str, snapshot: dict | None = None) -> int:
             p = provinces[slug]
             pr = p.get("prices") or {}
             if pr.get("92") is not None:
+                p98 = pr.get("98")
+                p98s = f" 98# {p98:.2f}" if p98 is not None else ""
                 msg += (
                     f"\n你所在的{p['name']}："
-                    f"92# {pr['92']:.2f} 95# {pr['95']:.2f} 0# {pr['0']:.2f}"
+                    f"92# {pr['92']:.2f} 95# {pr['95']:.2f}{p98s} 0# {pr['0']:.2f}"
                 )
         resp = send_message(s["chat_id"], msg)
         if resp and resp.get("ok"):
