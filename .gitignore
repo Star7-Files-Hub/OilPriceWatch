@@ -3,7 +3,9 @@ __pycache__/
 .venv/
 venv/
 .env
-data/
+# ⚠️ 必须写成 /data/ 锚定仓库根：只写 data/ 会连 tools/data/ 一起忽略掉，
+#    那样省级边界源数据就进不了仓库，别人克隆后没法重跑生成器。
+/data/
 *.db
 *.sqlite3
 *.log
