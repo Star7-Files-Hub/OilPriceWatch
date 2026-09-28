@@ -180,9 +180,13 @@ def build_digest(snapshot: dict) -> str:
             f"折合 92# {selfd['yuan_per_liter']['92']:+.3f} 元/升"
         )
     if site:
-        lines.append(
-            f"网站预测：{site['direction']} {site['yuan_per_ton']:.0f} 元/吨"
-        )
+        if site.get("yuan_per_ton") is not None:
+            lines.append(f"网站预测：{site['direction']} {site['yuan_per_ton']:.0f} 元/吨")
+        elif site.get("yuan_per_liter_min") is not None:
+            lines.append(
+                f"网站预测：{site['direction']} "
+                f"{site['yuan_per_liter_min']}-{site['yuan_per_liter_max']} 元/升"
+            )
     if w:
         lines.append(
             f"下次调价：{w['next_date']}（剩 {w['workdays_remaining']} 个工作日）"
@@ -257,7 +261,9 @@ def start_polling() -> threading.Event | None:
 def _poll_loop(token: str, stop: threading.Event) -> None:
     offset = 0
     while not stop.is_set():
-        resp = _post(token, "getUpdates", {"offset": offset, "timeout": 30})
+        # ⚠️ 客户端超时必须 > 长轮询 timeout(30)，否则每轮都在服务端还没返回时
+        #    先 read timeout，导致更新永远收不到（实测 10s 默认超时必炸）。
+        resp = _post(token, "getUpdates", {"offset": offset, "timeout": 30}, timeout=40)
         if not resp or not resp.get("ok"):
             time.sleep(2)
             continue

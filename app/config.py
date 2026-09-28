@@ -55,7 +55,10 @@ PROVINCE_BY_NAME: dict[str, Province] = {p.name: p for p in PROVINCES}
 
 # --- 数据源地址 ---------------------------------------------------------
 
-QIYOUJIAGE_BASE = "https://www.qiyoujiage.com"
+# ⚠️ 上游证书配置错误：https://www.qiyoujiage.com 与 https://qiyoujiage.com 的
+#    证书主机名都不匹配（CERTIFICATE_VERIFY_FAILED: Hostname mismatch），
+#    开着校验必挂。实测 http 正常返回且内容一致，故走 http（公开价格数据，无密钥）。
+QIYOUJIAGE_BASE = "http://www.qiyoujiage.com"
 QIYOUJIAGE_PROVINCE_URL = QIYOUJIAGE_BASE + "/{slug}.shtml"
 QIYOUJIAGE_SCHEDULE_URL = QIYOUJIAGE_BASE + "/tz/2025"
 

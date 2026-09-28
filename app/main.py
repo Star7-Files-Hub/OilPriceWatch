@@ -21,7 +21,7 @@ from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
-from . import collector, db, geolocate, bot, scheduler as _sched
+from . import collector, config, db, geolocate, bot, scheduler as _sched
 from .limit import RateLimitMiddleware
 
 logger = logging.getLogger("oilwatch.api")
@@ -29,13 +29,16 @@ logger = logging.getLogger("oilwatch.api")
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
 ADMIN_TOKEN = os.environ.get("OILWATCH_ADMIN_TOKEN")  # 不设则关闭保护（仅本地开发）
 
-# 冷启动：若没有任何缓存，先抓一次把数据垫上（本机需 OILWATCH_TLS_INSECURE=1）
+# 冷启动：无缓存、或缓存整体不可用（覆盖 0）时，先抓一次把数据垫上。
+# 覆盖 0 也要重抓，是因为上一次抓取可能因上游问题（如证书/限流）整批失败，
+# 若只判 `is None` 会把这份坏快照一直服务到下次定时刷新。
 def _bootstrap() -> None:
     db.init()
-    if db.latest() is None:
+    snap = db.latest()
+    if snap is None or _coverage(snap) == 0:
         try:
             collector.refresh()
-            logger.info("冷启动首次抓取成功")
+            logger.info("冷启动抓取成功")
         except Exception as exc:  # noqa: BLE001
             logger.warning("冷启动首次抓取失败（先返回 503，等定时任务补）：%s", exc)
 

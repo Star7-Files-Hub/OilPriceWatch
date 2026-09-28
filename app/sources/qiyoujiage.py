@@ -15,9 +15,15 @@ from ..net import get_text
 _SCRIPT_RE = re.compile(r"(?is)<(script|style)[^>]*>.*?</\1>")
 _TAG_RE = re.compile(r"(?s)<[^>]+>")
 _PRICE_RE = re.compile(r"^(\d+\.\d{1,3})$")
+
+# ⚠️ 该站预测文案改过：早期是「预计上调油价XXX元/吨(0.48-0.57元/升)」，
+#    现在常见「目前预计上涨0.30元/升-0.36元/升」（用词「上涨/下跌」、且只给元/升）。
+#    两种都要吃，方向统一归一化成 上调/下调。
+_DIR_MAP = {"上调": "上调", "上涨": "上调", "下调": "下调", "下跌": "下调"}
 _FORECAST_RE = re.compile(
-    r"预计(上调|下调)油价\s*(\d+(?:\.\d+)?)\s*元/吨"
-    r"(?:\s*\(([\d.]+)\s*元/升\s*-\s*([\d.]+)\s*元/升\))?"
+    r"预计\s*(上调|下调|上涨|下跌)\s*(?:油价)?\s*"
+    r"(?:([\d.]+)\s*元/吨)?"
+    r"(?:\s*[（(]?\s*([\d.]+)\s*元/升\s*-\s*([\d.]+)\s*元/升\s*[)）]?)?"
 )
 
 
@@ -42,10 +48,10 @@ def _find_price(lines: list[str], label: str) -> float | None:
 def _find_forecast(lines: list[str]) -> dict | None:
     for ln in lines:
         match = _FORECAST_RE.search(ln)
-        if match:
+        if match and (match.group(2) or match.group(3)):
             return {
-                "direction": match.group(1),
-                "yuan_per_ton": float(match.group(2)),
+                "direction": _DIR_MAP[match.group(1)],
+                "yuan_per_ton": float(match.group(2)) if match.group(2) else None,
                 "yuan_per_liter_min": float(match.group(3)) if match.group(3) else None,
                 "yuan_per_liter_max": float(match.group(4)) if match.group(4) else None,
                 "text": ln[:140],

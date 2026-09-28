@@ -74,8 +74,12 @@ def render(data: dict) -> str:
     if site:
         liters = ""
         if site.get("yuan_per_liter_min") is not None:
-            liters = f"  ({site['yuan_per_liter_min']}-{site['yuan_per_liter_max']} 元/升)"
-        add(f"  网站预测    {site['direction']} {site['yuan_per_ton']:.0f} 元/吨{liters}")
+            liters = f"{site['yuan_per_liter_min']}-{site['yuan_per_liter_max']} 元/升"
+        if site.get("yuan_per_ton") is not None:
+            add(f"  网站预测    {site['direction']} {site['yuan_per_ton']:.0f} 元/吨  ({liters})")
+        else:
+            # 站点只给元/升时（新文案），没有元/吨可显示
+            add(f"  网站预测    {site['direction']} {liters}")
     else:
         add("  网站预测    未取到")
 
