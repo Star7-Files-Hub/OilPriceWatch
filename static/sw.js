@@ -1,5 +1,8 @@
 /* OilPriceWatch Service Worker：让 H5 可"添加到主屏幕"且能离线看壳。 */
-const CACHE = "oilwatch-v2";
+// ⚠️ 改了 static/ 下的任何 SHELL 资源都要把这个版本号 +1，否则老用户
+//    一直吃缓存（静态分支是缓存优先），看不到新页面。
+//    v3: index.html 增加「网站预测 x 元/吨（由元/升折算）」一行
+const CACHE = "oilwatch-v3";
 const SHELL = [
   "/",
   "/static/index.html",
