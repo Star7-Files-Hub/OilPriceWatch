@@ -1,11 +1,29 @@
 """Telegram Bot：订阅 + 调价推送。
 
+🔴 **这个 bot 的 token 是多个项目共用的**（tg-assistant 的通知机器人用的就是它）。
+   共用意味着两件事，改这个文件之前必须先读懂，否则会直接把别人的机器人搞坏：
+
+   1. **命令面必须独占命名空间**。裸命令（``/start`` ``/help`` ``/status``…）是所有项目
+      都想抢的公共名字，撞上就是互相覆盖回复。本项目一律用 ``/oil`` 前缀
+      （见 :data:`_COMMANDS`），**匹配不到就完全沉默** —— 不回「未知命令」、不回欢迎语、
+      不做任何默认话术。别的项目爱用什么命令是它们的事，我们连问都不问。
+      （同一条约定在 tg-assistant 侧写成了 ``tg_assistant/bot_commands.py`` 的开头注释。）
+
+   2. **绝不碰全局状态**。``getUpdates`` 的 ``offset``、``setWebhook``/``deleteWebhook``、
+      ``setMyCommands`` 全是**按 token 全局唯一**的：推进 offset 会把别的项目该收到的
+      更新一并确认掉，``setWebhook`` 会直接掐断别人的 getUpdates 通道。所以：
+      · 轮询**永远不传 offset**（见 :func:`_poll_loop`），只做本地去重；
+      · ``set_webhook`` / ``delete_webhook`` 默认**拒绝执行**，需显式 opt-in。
+
+   发送类接口（``sendMessage``）不动全局状态，随便用。
+
 设计取舍（关键）：不引第三方 Bot 框架（aiogram/PTB），直接用 httpx 调 Telegram Bot API。
 理由：
 - 需求很简单（发消息 + 几个命令 + 接收更新），框架是杀鸡用牛刀，还得多装依赖；
 - 接收更新两条路都支持：①公网 HTTPS 时用 **Webhook**（`POST /webhook/tg`，nginx 终止 TLS）；
-  ②没有固定公网地址时用 **Polling**（后台线程 getUpdates）。由 `OILWATCH_TG_WEBHOOK_URL`
-  是否配置自动二选一。
+  ②没有固定公网地址时用 **Polling**（后台线程 getUpdates，**不推进 offset**）。
+  由 `OILWATCH_TG_WEBHOOK_URL` 是否配置自动二选一（共用 bot 上 webhook 是全局状态，
+  只能由某一个项目设置，本项目不会主动去设）。
 - token 全部从环境变量读（`OILWATCH_TG_BOT_TOKEN`）。**没配 token 时所有发送静默跳过**，
   所以本机开发、服务器没填 token 都不会崩，只是不推送。
 
@@ -14,6 +32,7 @@
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -116,7 +135,27 @@ def send_message(chat_id, text: str, parse_mode: str = "HTML") -> dict | None:
     )
 
 
+def _webhook_allowed() -> bool:
+    """共用 bot 上是否允许改动 webhook —— 默认**不允许**，需显式 opt-in。
+
+    为什么默认拒绝：``setWebhook`` 改的是**按 token 全局唯一**的投递方式，一旦设置，
+    共用这个 token 的其它项目立刻收不到任何 getUpdates（Telegram 会返回 409）。
+    本项目自己的服务器上根本没有 HTTPS 域名，也不需要 webhook，
+    所以最安全的默认就是「不碰」。哪天真要单独用这个 bot 了，
+    再设 ``OILWATCH_TG_ALLOW_WEBHOOK=1`` 并确认它已不再被别的项目共用。
+    """
+    return os.environ.get("OILWATCH_TG_ALLOW_WEBHOOK") == "1"
+
+
 def set_webhook() -> dict | None:
+    """设置 webhook —— 🔴 共用 bot 上的**全局破坏性**操作，默认拒绝。"""
+    if not _webhook_allowed():
+        logger.error(
+            "拒绝 setWebhook：此 bot 与其它项目共用 webhook 是全局状态，"
+            "会把别的项目的 getUpdates 掐断。确需设置请显式设 "
+            "OILWATCH_TG_ALLOW_WEBHOOK=1 并确认该 bot 已不再共用。"
+        )
+        return None
     token = get_token()
     if not token:
         logger.warning("未配置 TG token，无法设置 webhook")
@@ -133,6 +172,13 @@ def set_webhook() -> dict | None:
 
 
 def delete_webhook() -> dict | None:
+    """删除 webhook —— 同样是全局状态（还会 ``drop_pending_updates`` 清队列），默认拒绝。"""
+    if not _webhook_allowed():
+        logger.error(
+            "拒绝 deleteWebhook：此 bot 与其它项目共用，"
+            "删别人的 webhook / 丢别人的待处理更新都可能直接搞坏对方。"
+        )
+        return None
     token = get_token()
     if not token:
         return None
@@ -152,47 +198,129 @@ def _find_province(text: str):
 
 _PROVINCE_RE = re.compile(r"^[\u4e00-\u9fa5]{2,4}$")
 
+#: 本项目在共用 bot 上**独占**的命名空间前缀。所有命令都挂在这下面。
+_NAMESPACE = "/oil"
 
-def handle_text(chat_id, text: str) -> str:
-    """处理一条消息文本，返回要回复的内容（None 表示不回复）。
+#: 命名空间内认得的命令 → 动作。**只有这张表里的才回应。**
+_COMMANDS: dict[str, str] = {
+    "/oil": "help",
+    "/oil_help": "help",
+    "/oil_start": "start",
+    "/oil_stop": "stop",
+    "/oil_province": "province",
+}
 
-    不碰网络；订阅状态写入 db。命令与省份识别都在这。
+_HELP_TEXT = (
+    "⛽ 油价监控 · 可用命令（都带 /oil 前缀，避免和别的机器人撞车）\n\n"
+    "· /oil_start 订阅全国油价提醒\n"
+    "· /oil_start 浙江 订阅并指定省份\n"
+    "· /oil_province 浙江 改省份\n"
+    "· /oil_stop 取消订阅\n"
+    "· 也可以直接发一个省份名（如「浙江」）\n\n"
+    "新一轮调价窗口开启时推送一次，其余时间不打扰。"
+)
+
+_UNKNOWN_OIL_TEXT = (
+    "这条命令我不认识。可用：\n"
+    "· /oil_start [省份] 订阅\n"
+    "· /oil_province 省份 改省份\n"
+    "· /oil_stop 取消订阅\n"
+    "· /oil_help 看说明"
+)
+
+
+def parse_command(text: str) -> tuple[str, str] | None:
+    """把一条消息解析成「**本项目自己的**命令」。
+
+    返回 ``(动作, 参数)``；**不是本项目的消息一律返回 None**，调用方必须保持完全沉默。
+    动作取值：``help`` / ``start`` / ``stop`` / ``province`` / ``unknown``。
+
+    只认两类输入，别的连看都不看：
+
+    1. ``/oil`` 命名空间下的命令（``/oil_start``、``/oil_province 浙江``…）。
+       顺带剥掉群里客户端自动补的 ``@botusername`` 后缀。
+       **非 ``/oil`` 开头的命令（``/status``、``/start``、``/help``…）一律返回 None** ——
+       那是别的项目的命令，我们既不回复也不记日志刷屏。
+    2. **恰好等于某个省份名**的纯文本（``浙江`` / ``广东省``），这是本项目的省份设置入口。
+       其它任何文本（闲聊、别的项目的关键词）都返回 None。
+
+    ⚠️ 这就是「只回自己的命令」的落点：命名空间内的未知命令才给提示（撞不到别人），
+       命名空间外的世界一律沉默 —— **绝不回「未知命令」这种公共话术**。
     """
     cmd = (text or "").strip()
-    if cmd.startswith("/start") or cmd.startswith("/help"):
+    if not cmd:
+        return None
+
+    if cmd.startswith("/"):
+        head, _, rest = cmd.partition(" ")
+        # 群里发的命令会带 ``@botusername`` 后缀，剥掉再匹配。
+        head = head.split("@", 1)[0].lower()
+        if not head.startswith(_NAMESPACE):
+            return None  # 别的项目的命令 ⇒ 沉默
+        action = _COMMANDS.get(head)
+        if action is None:
+            return ("unknown", "")  # 自己的命名空间，可以给个提示
+        return (action, rest.strip())
+
+    if _PROVINCE_RE.match(cmd) and _find_province(cmd):
+        return ("province", cmd)
+    return None
+
+
+def handle_text(chat_id, text: str) -> str | None:
+    """处理一条消息文本，返回要回复的内容（**None 表示不回复，必须沉默**）。
+
+    不碰网络；订阅状态写入 db。命令识别全部委托给 :func:`parse_command`，
+    这里只负责「认得的命令该回什么」。
+    """
+    parsed = parse_command(text)
+    if parsed is None:
+        return None
+    action, arg = parsed
+
+    if action == "help":
+        return _HELP_TEXT
+
+    if action == "unknown":
+        return _UNKNOWN_OIL_TEXT
+
+    if action == "stop":
+        db.remove_subscriber(str(chat_id))
+        return "已取消订阅。需要时发 /oil_start 重新订阅。"
+
+    if action == "start":
+        if arg:
+            p = _find_province(arg)
+            if not p:
+                return "没认出这个省份，试试「浙江」「广东」这样的全称。"
+            db.add_subscriber(str(chat_id), p.slug)
+            return (
+                f"已订阅全国油价提醒 ⛽\n省份：{p.name}\n"
+                "新一轮调价窗口开启时会推送提醒。/oil_stop 退订。"
+            )
         db.add_subscriber(str(chat_id))
         return (
             "已订阅全国油价提醒 ⛽\n\n"
-            "· 直接发「省份名」或 /province 浙江 设置你所在的省份\n"
+            "· 发「省份名」或 /oil_province 浙江 设置你所在的省份\n"
             "· 新一轮调价窗口开启时会主动推送提醒\n"
-            "· /stop 取消订阅"
+            "· /oil_stop 取消订阅"
         )
-    if cmd.startswith("/stop"):
-        db.remove_subscriber(str(chat_id))
-        return "已取消订阅。需要时发 /start 重新订阅。"
-    if cmd.startswith("/province"):
-        name = cmd[len("/province"):].strip()
-        p = _find_province(name)
-        if not p:
-            return "没认出这个省份，试试「浙江」「广东」这样的全称。"
-        db.add_subscriber(str(chat_id), p.slug)
-        return f"已把你所在的省份设为 {p.name} ✅\n调价提醒将按 {p.name} 的油价播报。"
-    if _PROVINCE_RE.match(cmd):
-        p = _find_province(cmd)
-        if not p:
-            return "没认出这个省份，试试「浙江」「广东」这样的全称。"
-        db.add_subscriber(str(chat_id), p.slug)
-        return f"已把你所在的省份设为 {p.name} ✅"
-    if cmd.startswith("/"):
-        return "未知命令。发「省份名」设置所在省份，/stop 退订。"
-    return (
-        "我是油价监控机器人。发「省份名」设置你所在的省份，"
-        "调价前会提醒你。/stop 退订。"
-    )
+
+    # action == "province"
+    p = _find_province(arg)
+    if not p:
+        return "没认出这个省份，试试「浙江」「广东」这样的全称。"
+    db.add_subscriber(str(chat_id), p.slug)
+    return f"已把你所在的省份设为 {p.name} ✅\n调价提醒将按 {p.name} 的油价播报。"
 
 
 def dispatch_update(update: dict) -> None:
-    """Webhook 与 Polling 共用的更新分发。"""
+    """Webhook 与 Polling 共用的更新分发。
+
+    🔴 **不是本项目的更新一律静默丢弃**（只留一行 debug）：这个 bot 被多个项目共用，
+    踢回来的任何一条更新都可能是别人的命令，我们没有任何资格去回一句
+    「未知命令」—— 那正是之前 `/status` 被抢答成油价欢迎语的原因。
+    """
     message = update.get("message") or update.get("edited_message")
     if not message:
         return
@@ -201,8 +329,11 @@ def dispatch_update(update: dict) -> None:
     text = (message.get("text") or "").strip()
     if chat_id is None or not text:
         return
+    if parse_command(text) is None:
+        logger.debug("非本项目命令，静默忽略 chat=%s text=%r", chat_id, text[:30])
+        return
     t0 = time.monotonic()
-    logger.info("收到消息 chat=%s text=%r", chat_id, text[:30])
+    logger.info("收到本项目命令 chat=%s text=%r", chat_id, text[:30])
     reply = handle_text(chat_id, text)
     if reply:
         send_message(chat_id, reply)
@@ -300,6 +431,57 @@ def maybe_push(snapshot: dict) -> dict:
 
 
 # --- Polling（无公网地址时的兜底）---------------------------------------
+#
+# 🔴 **本模块的轮询不推进 offset**，这是刻意设计而不是忘了传参数，理由见 _poll_loop。
+
+#: 本地去重表在 settings 里的键名。
+_SEEN_KEY = "tg_seen_update_ids"
+
+#: 本地去重表最多记多少个 update_id（超出丢最老的）。
+#: 为什么不推进 offset 也不会漏自己的命令、也不会重复回复：见 :func:`_poll_loop`。
+_SEEN_CAP = 500
+
+#: getUpdates 单次要多少条（Telegram 上限 100）。
+_FETCH_LIMIT = 100
+
+#: 没有新消息时的退避秒数。可调：``OILWATCH_TG_POLL_IDLE_SLEEP``。
+_DEFAULT_IDLE_SLEEP = 2.0
+
+
+def _idle_sleep() -> float:
+    raw = os.environ.get("OILWATCH_TG_POLL_IDLE_SLEEP")
+    if not raw:
+        return _DEFAULT_IDLE_SLEEP
+    try:
+        return max(0.2, float(raw))
+    except ValueError:
+        return _DEFAULT_IDLE_SLEEP
+
+
+def _load_seen() -> list[int]:
+    """从 settings 读出已处理过的 update_id。
+
+    为什么要持久化：不推进 offset ⇒ 同一个更新会被 Telegram **反复**返回，
+    进程重启后如果去重表丢了，就会把老消息再回一遍（用户看到重复回复）。
+    """
+    raw = db.get_setting(_SEEN_KEY)
+    if not raw:
+        return []
+    try:
+        items = json.loads(raw)
+    except ValueError:
+        return []
+    out: list[int] = []
+    for it in items if isinstance(items, list) else []:
+        try:
+            out.append(int(it))
+        except (TypeError, ValueError):
+            continue
+    return out[-_SEEN_CAP:]
+
+
+def _save_seen(seen: list[int]) -> None:
+    db.set_setting(_SEEN_KEY, json.dumps(seen[-_SEEN_CAP:]))
 
 
 def start_polling() -> threading.Event | None:
@@ -308,37 +490,89 @@ def start_polling() -> threading.Event | None:
         logger.info("未配置 TG token，不启动轮询")
         return None
     if get_webhook_url():
-        logger.info("已配置 webhook，跳过轮询")
+        logger.warning(
+            "已配置 OILWATCH_TG_WEBHOOK_URL ⇒ 跳过轮询，改由 /webhook/tg 收更新。"
+            "⚠️ 此 bot 与其它项目共用，webhook 是全局状态；本项目不会主动去设它。"
+        )
         return None
     stop = threading.Event()
     threading.Thread(target=_poll_loop, args=(token, stop), daemon=True).start()
-    logger.info("TG 轮询已启动")
+    logger.info("TG 轮询已启动（非侵入式：不推进 offset，只处理 /oil* 命令）")
     return stop
 
 
 def _poll_loop(token: str, stop: threading.Event) -> None:
-    offset = 0
+    """后台轮询。**绝不传 offset** —— 这是本文件最重要的一个约定。
+
+    为什么：``offset`` 是**按 token 全局唯一**的确认水位。传了它，Telegram 会把
+    所有 ``update_id < offset`` 的更新一并标记为已确认并删除 —— 共用这个 token 的
+    其它项目（tg-assistant 等）就永远收不到自己那几条了。这正是 tg-assistant 侧
+    ``bot_commands.py`` 开头写死的那条约定。
+
+    不传 offset 的代价与对策：
+    · Telegram 会**反复返回同一批未确认更新** ⇒ 本地用 update_id 去重（持久化到
+      settings，重启也不重复回复）；取回来全是老消息时主动退避 ``idle_sleep``，
+      避免空转打 API。
+    · 触发长轮询的前提是「队列里没有未确认更新」；有老消息压着时接口会立刻返回，
+      所以那点退避是必须的，不是为了省流量。
+    · 去重表只留最近 :data:`_SEEN_CAP` 条。真出现「同时压着几百条未确认更新」时
+      会告警（见下），因为那时 getUpdates 一页取不完，新命令会被老消息挡在后面。
+    """
+    seen = _load_seen()
+    seen_set = set(seen)
+    idle = _idle_sleep()
+    logger.info("轮询去重表已载入 %d 条历史 update_id", len(seen))
+
     while not stop.is_set():
         # ⚠️ 客户端超时必须 > 长轮询 timeout(30)，否则每轮都在服务端还没返回时
         #    先 read timeout，导致更新永远收不到（实测 10s 默认超时必炸）。
         resp = _post(
             token,
             "getUpdates",
-            {"offset": offset, "timeout": 30},
+            {"timeout": 30, "limit": _FETCH_LIMIT},  # ⚠️ 故意不传 offset
             timeout=40,
             retry_transport=True,
         )
         if not resp or not resp.get("ok"):
-            time.sleep(2)
+            # 409 的典型原因：有人给这个共用 token 设了 webhook ⇒ getUpdates 被禁。
+            # 这时**绝不能**去 deleteWebhook（那也是全局状态，会搞坏对方），只能报出来让人处理。
+            time.sleep(idle)
             continue
+
         updates = resp.get("result", [])
-        if updates:
-            logger.info("getUpdates 取到 %d 条更新", len(updates))
-        for u in updates:
-            offset = u["update_id"] + 1
+        if len(updates) >= _FETCH_LIMIT:
+            logger.warning(
+                "未确认更新已压到 %d 条（取回上限）：不推进 offset 的前提下，"
+                "更新的命令会被这一页老消息挡在后面。需要人工确认是否有人在用 "
+                "getUpdates 消费这个共用 bot。",
+                len(updates),
+            )
+
+        fresh = [u for u in updates if u.get("update_id") not in seen_set]
+        if not fresh:
+            # 全是已处理过的老消息（未确认所以被反复返回）—— 退避，别空转。
+            time.sleep(idle)
+            continue
+
+        logger.info("取到 %d 条新更新（未确认池共 %d 条）", len(fresh), len(updates))
+        for u in fresh:
+            uid = u.get("update_id")
+            if isinstance(uid, int):
+                seen.append(uid)
+                seen_set.add(uid)
+            # 先记账再处理：处理失败也不重放，免得一条毒更新被无限重试。
             try:
                 dispatch_update(u)
             except Exception as exc:  # noqa: BLE001
                 logger.warning("处理更新失败: %s", exc)
+
+        # 去重表封顶，防止 settings 无限增长。
+        while len(seen) > _SEEN_CAP:
+            seen_set.discard(seen.pop(0))
+        try:
+            _save_seen(seen)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("持久化去重表失败（本次仍生效）: %s", exc)
+
         # 复用连接后这个间隔只为让出 GIL / 防止空转，不需要再靠它兜握手时间。
         time.sleep(0.05)

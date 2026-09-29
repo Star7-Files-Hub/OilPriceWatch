@@ -74,5 +74,49 @@ class TestSessionClosesConnection(unittest.TestCase):
         self.assertEqual(db.get_setting("k"), "v")
 
 
+class TestAddSubscriberKeepsProvince(unittest.TestCase):
+    """回归：``/oil_start`` 不带省份时**不能**把已设省份清成 NULL。
+
+    旧 SQL 是 ``DO UPDATE SET province_slug = excluded.province_slug``：
+    excluded 为 NULL 就直接覆盖 ⇒ 用户随手发一次 ``/oil_start`` 省份就没了，
+    调价播报悄悄退化成全国版（不报错、只是少了那一行）。
+    ⚠️ 这条必须跑**真 sqlite** 才抓得到 —— 替身 DB 不实现 SQL 语义。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved_path = db.DB_PATH
+        db.DB_PATH = Path(self._tmp.name) / "t.db"
+        db.init()
+
+    def tearDown(self):
+        db.DB_PATH = self._saved_path
+        self._tmp.cleanup()
+
+    @staticmethod
+    def _subs() -> dict:
+        return {s["chat_id"]: s["province_slug"] for s in db.list_subscribers()}
+
+    def test_none_keeps_existing_province(self):
+        db.add_subscriber("1", "zhejiang")
+        db.add_subscriber("1")  # 不带省份的 /oil_start
+        self.assertEqual(self._subs()["1"], "zhejiang")
+
+    def test_explicit_province_still_updates(self):
+        db.add_subscriber("1", "zhejiang")
+        db.add_subscriber("1", "guangdong")
+        self.assertEqual(self._subs()["1"], "guangdong")
+
+    def test_new_subscriber_without_province_is_none(self):
+        db.add_subscriber("2")
+        self.assertIsNone(self._subs()["2"])
+
+    def test_set_subscriber_province_can_still_clear(self):
+        """真要清空省份，得走 set_subscriber_province，语义没被堵死。"""
+        db.add_subscriber("1", "zhejiang")
+        db.set_subscriber_province("1", None)
+        self.assertIsNone(self._subs()["1"])
+
+
 if __name__ == "__main__":
     unittest.main()

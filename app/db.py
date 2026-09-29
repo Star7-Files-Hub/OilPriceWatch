@@ -124,10 +124,17 @@ def set_setting(key: str, value: str) -> None:
 
 
 def add_subscriber(chat_id: str, province_slug: str | None = None) -> None:
+    """订阅（已订阅则更新省份）。
+
+    ⚠️ 省份传 ``None`` 时**保留原值**，不是清空：``/oil_start`` 不带省份只是
+    「确认订阅」，不该把用户先前设好的省份抹掉（``COALESCE`` 就是为了这个）。
+    真要清空省份请用 :func:`set_subscriber_province`。
+    """
     with _session(write=True) as conn:
         conn.execute(
             "INSERT INTO subscribers(chat_id, province_slug) VALUES (?, ?) "
-            "ON CONFLICT(chat_id) DO UPDATE SET province_slug = excluded.province_slug",
+            "ON CONFLICT(chat_id) DO UPDATE SET "
+            "province_slug = COALESCE(excluded.province_slug, subscribers.province_slug)",
             (str(chat_id), province_slug),
         )
 

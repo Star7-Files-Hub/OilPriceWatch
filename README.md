@@ -39,10 +39,38 @@
 ## 功能
 
 - **H5**：31 省油价一览、调价倒计时进度条、自动定位所在省、PWA 可添加到主屏幕离线查看
-- **Telegram Bot**：发省份名订阅；新一轮调价窗口开启时推送，附带你所在省的实时油价
+- **Telegram Bot**：`/oil_start [省份]` 订阅；新一轮调价窗口开启时推送，附带你所在省的实时油价
 - **定时刷新**：每 30 分钟打一次上游并落 SQLite 缓存；访客只读缓存，不会穿透到上游
 - **CLI**：一条命令输出全国油价 + 预测，支持 `--json`
 - **自动定位**：浏览器定位（HTTPS 下）优先，坐标**在本机**换算成省份；退回 IP 推断
+
+## 🔴 机器人是共用的 —— 改 bot 前必读
+
+线上这个 bot 的 token **与 tg-assistant 等项目共用**（就是那个通知机器人）。
+共用意味着两条硬约束，`app/bot.py` 开头也有同样的注释：
+
+1. **命令面独占命名空间**。所有命令都带 `/oil` 前缀，**匹配不到就完全沉默** ——
+   不回「未知命令」、不回欢迎语、不做任何默认话术。
+   踩过的坑：`/status` 是 tg-assistant 的命令，本项目曾用一段油价欢迎语把它抢答了。
+
+   | 命令 | 作用 |
+   |---|---|
+   | `/oil_start` / `/oil_start 浙江` | 订阅（可同时指定省份） |
+   | `/oil_province 浙江` | 改省份 |
+   | `/oil_stop` | 退订 |
+   | `/oil_help`（或 `/oil`） | 说明 |
+   | 直接发「浙江」 | 等同于 `/oil_province 浙江` |
+
+   别的项目的命令（`/status` `/start` `/help`…）与任意闲聊**一律不回应**，
+   连日志都只打 debug。
+
+2. **绝不碰按 token 全局唯一的状态**。
+   - 轮询**永远不传 `offset`**：offset 是全局确认水位，传了就会把别的项目该收到的
+     更新一并确认掉。代价是 Telegram 会反复返回同一批未确认更新，本项目在本地按
+     `update_id` 去重（落 `settings`，重启不重复回复）并在没有新消息时退避。
+   - `set_webhook()` / `delete_webhook()` **默认拒绝执行**（会掐断别人的 getUpdates），
+     需显式设 `OILWATCH_TG_ALLOW_WEBHOOK=1` 才放行。
+   - `sendMessage` 这类发送接口不动全局状态，正常使用。
 
 ## 快速开始
 
@@ -72,6 +100,8 @@ Bot 会静默跳过，管理接口在未设 token 时放行（仅适合本地调
 | `OILWATCH_TG_BOT_TOKEN` | Telegram Bot Token（@BotFather）。留空则 Bot 功能整体关闭 |
 | `OILWATCH_TG_WEBHOOK_URL` | 配了就走 Webhook（需公网 HTTPS），否则走 Polling |
 | `OILWATCH_TG_WEBHOOK_SECRET` | Webhook 校验密钥，可选但推荐 |
+| `OILWATCH_TG_ALLOW_WEBHOOK` | 共用 bot 上**默认不设**：设成 `1` 才允许 `setWebhook`/`deleteWebhook`（会掐断别的项目） |
+| `OILWATCH_TG_POLL_IDLE_SLEEP` | 轮询没有新消息时的退避秒数，默认 `2.0`。共用 bot 上别调太小（不推进 offset ⇒ 老更新会被反复取回） |
 | `OILWATCH_ADMIN_TOKEN` | 保护 `/api/refresh` 与改锚点接口 |
 | `OILWATCH_LOG_LEVEL` | 日志级别，默认 `INFO` |
 | `OILWATCH_TLS_INSECURE` | **仅本机沙箱调试**用，部署到服务器后**不要设** |
@@ -130,11 +160,13 @@ deploy/            systemd / nginx / .env 示例
 ## 测试
 
 ```bash
-pytest tests/ -q      # 54 passed
+pytest tests/ -q      # 92 passed
 ```
 
 覆盖调价窗口推算与节假日、预测文案解析与方向归一化、省份判定（41 个城市用例，
-并用 node 与 Python 参考实现对拍防漂移）、Bot 命令与连接复用、DB 连接关闭。
+并用 node 与 Python 参考实现对拍防漂移）、DB 连接关闭与订阅省份不被清空、
+以及共用 bot 的两条隔离约定（命令白名单 + 轮询不推进 offset）——后者做过缺陷注入，
+把旧行为换回去必定变红。
 
 ## 免责声明
 

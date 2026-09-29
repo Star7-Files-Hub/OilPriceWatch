@@ -173,6 +173,11 @@ def bot_status() -> dict:
         "token_configured": bool(bot.get_token()),
         "mode": "webhook" if bot.get_webhook_url() else "polling",
         "subscribers": db.subscriber_count(),
+        # 这个 bot 与其它项目共用 ⇒ 下面两项是硬约束，改代码前先读 app/bot.py 开头。
+        # shared_bot: 共用 token；offset_advancing: 轮询是否推进全局 offset（必须为 False）。
+        "shared_bot": True,
+        "offset_advancing": False,
+        "commands": sorted(bot._COMMANDS),
     }
 
 
