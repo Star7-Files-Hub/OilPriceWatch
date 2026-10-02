@@ -17,6 +17,7 @@ class _FakeDB:
         self.settings = dict(settings or {})
         self.removed = []
         self.snapshot = snapshot
+        self.pending = {}
 
     def add_subscriber(self, chat_id, province_slug=None):
         # 与真 db 对齐：None 表示「保留原值」，不是清空。
@@ -28,6 +29,15 @@ class _FakeDB:
     def remove_subscriber(self, chat_id):
         self.removed.append(str(chat_id))
         self.subs.pop(str(chat_id), None)
+
+    def set_pending_subscription(self, chat_id, province_slug):
+        self.pending[str(chat_id)] = province_slug
+
+    def get_pending_subscription(self, chat_id):
+        return self.pending.get(str(chat_id))
+
+    def clear_pending_subscription(self, chat_id):
+        self.pending.pop(str(chat_id), None)
 
     def get_setting(self, key, default=None):
         return self.settings.get(key, default)
@@ -224,9 +234,10 @@ class TestCommandWhitelist(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(bot.parse_command(text))
 
-    def test_province_name_still_recognized(self):
-        self.assertEqual(bot.parse_command("浙江"), ("province", "浙江"))
-        self.assertEqual(bot.parse_command("广东省"), ("province", "广东省"))
+    def test_province_name_is_recognized_as_plain_form(self):
+        """纯省份名要与 ``/oil_province`` 区分开：前者保守处理（私聊+确认）。"""
+        self.assertEqual(bot.parse_command("浙江"), ("province_plain", "浙江"))
+        self.assertEqual(bot.parse_command("广东省"), ("province_plain", "广东省"))
 
     def test_unknown_province_word_is_silent(self):
         self.assertIsNone(bot.parse_command("没这个省"))
@@ -277,9 +288,93 @@ class TestHandleText(unittest.TestCase):
     def test_unknown_oil_command_hints_own_commands(self):
         self.assertIn("/oil_start", bot.handle_text(1, "/oil_xyz"))
 
-    def test_province_plain_text_subscribes(self):
-        bot.handle_text(1, "浙江")
+    def test_province_plain_text_asks_before_subscribing(self):
+        """私聊里发纯省份名 ⇒ **先问一句**，不许直接订阅。"""
+        reply = bot.handle_text(1, "浙江", "private")
+        self.assertIn("要订阅", reply)
+        self.assertIn("浙江", reply)
+        self.assertEqual(self.db.subs, {}, "还没确认就订阅了")
+        self.assertEqual(self.db.pending["1"], "zhejiang")
+
+    def test_province_plain_text_in_group_is_silent(self):
+        """🔴 群里**完全不认**纯省份名：不回复、不订阅、不记待办。
+
+        共用 bot 上群里那句「北京」很可能是别人的对话，接过去就是抢答。
+        """
+        for chat_type in ("group", "supergroup", "channel"):
+            with self.subTest(chat_type=chat_type):
+                self.assertIsNone(bot.handle_text(1, "浙江", chat_type))
+                self.assertEqual(self.db.subs, {})
+                self.assertEqual(self.db.pending, {})
+
+    def test_group_can_still_use_explicit_command(self):
+        """群里只是不认「纯省份名」，显式命令照常。"""
+        bot.handle_text(1, "/oil_start 浙江", "group")
         self.assertEqual(self.db.subs["1"], "zhejiang")
+
+
+class TestSubscribeConfirmation(unittest.TestCase):
+    """纯省份名 → 问一句 → 回「是」才订阅（共用 bot 上的防误伤设计）。"""
+
+    def setUp(self):
+        self._saved = bot.db
+        self.db = _FakeDB()
+        bot.db = self.db
+
+    def tearDown(self):
+        bot.db = self._saved
+
+    def test_yes_confirms_and_subscribes(self):
+        bot.handle_text(1, "浙江", "private")
+        reply = bot.handle_text(1, "是", "private")
+        self.assertIn("已订阅", reply)
+        self.assertEqual(self.db.subs["1"], "zhejiang")
+        self.assertEqual(self.db.pending, {}, "确认后待办没清掉")
+
+    def test_no_cancels_without_subscribing(self):
+        bot.handle_text(1, "浙江", "private")
+        reply = bot.handle_text(1, "否", "private")
+        self.assertIn("取消", reply)
+        self.assertEqual(self.db.subs, {})
+        self.assertEqual(self.db.pending, {})
+
+    def test_confirmation_words_without_pending_are_silent(self):
+        """🔴 核心防误伤：没有本项目待办时，「是」必须沉默。"""
+        for word in ("是", "好的", "要", "否", "取消", "yes", "OK"):
+            with self.subTest(word=word):
+                self.assertIsNone(bot.handle_text(999, word, "private"))
+
+    def test_confirmation_is_per_chat(self):
+        bot.handle_text(1, "浙江", "private")
+        # 另一个人说「是」，不该替 1 号确认
+        self.assertIsNone(bot.handle_text(2, "是", "private"))
+        self.assertEqual(self.db.subs, {})
+        self.assertEqual(self.db.pending, {"1": "zhejiang"})
+
+    def test_later_province_overrides_pending(self):
+        bot.handle_text(1, "浙江", "private")
+        bot.handle_text(1, "广东", "private")
+        self.assertEqual(self.db.pending["1"], "guangdong")
+        bot.handle_text(1, "是", "private")
+        self.assertEqual(self.db.subs["1"], "guangdong")
+
+    def test_explicit_command_clears_pending(self):
+        """用显式命令订阅后，不该再留一条待办等着被下一句「是」误触发。"""
+        bot.handle_text(1, "浙江", "private")
+        bot.handle_text(1, "/oil_start 广东", "private")
+        self.assertEqual(self.db.subs["1"], "guangdong")
+        self.assertEqual(self.db.pending, {})
+
+    def test_stop_clears_pending(self):
+        bot.handle_text(1, "浙江", "private")
+        bot.handle_text(1, "/oil_stop", "private")
+        self.assertEqual(self.db.pending, {})
+
+    def test_long_sentence_with_yes_is_not_confirmation(self):
+        """不能把闲聊里的「是的我在北京」当成确认。"""
+        bot.handle_text(1, "浙江", "private")
+        self.assertIsNone(bot.handle_text(1, "是的我在北京", "private"))
+        self.assertEqual(self.db.subs, {})
 
 
 class TestDispatchSilence(unittest.TestCase):
@@ -295,8 +390,11 @@ class TestDispatchSilence(unittest.TestCase):
         bot.db, bot.send_message = self._saved_db, self._saved_send
 
     @staticmethod
-    def _update(text, chat=5608153118):
-        return {"update_id": 1, "message": {"chat": {"id": chat}, "text": text}}
+    def _update(text, chat=5608153118, chat_type="private"):
+        return {
+            "update_id": 1,
+            "message": {"chat": {"id": chat, "type": chat_type}, "text": text},
+        }
 
     def test_status_command_is_ignored(self):
         """线上事故回归：tg-assistant 的 ``/status`` 曾被本项目的欢迎语抢答。"""
@@ -307,10 +405,39 @@ class TestDispatchSilence(unittest.TestCase):
         bot.dispatch_update(self._update("你好"))
         self.assertEqual(self.sent, [])
 
+    def test_bare_yes_from_stranger_is_ignored(self):
+        """比 /status 更危险的一种抢答：别人的对话里一句「是」。"""
+        bot.dispatch_update(self._update("是"))
+        self.assertEqual(self.sent, [])
+
+    def test_bare_province_in_group_is_ignored(self):
+        bot.dispatch_update(self._update("北京", chat=-1001234567890, chat_type="supergroup"))
+        self.assertEqual(self.sent, [], "群里被纯省份名抢答了")
+        self.assertEqual(bot.db.subs, {})
+
+    def test_bare_province_in_private_asks_then_confirms(self):
+        bot.dispatch_update(self._update("浙江"))
+        self.assertEqual(len(self.sent), 1)
+        self.assertIn("要订阅", self.sent[0][1])
+        self.assertEqual(bot.db.subs, {}, "还没确认就订阅了")
+
+        bot.dispatch_update(self._update("是"))
+        self.assertEqual(len(self.sent), 2)
+        self.assertIn("已订阅", self.sent[1][1])
+        self.assertEqual(bot.db.subs["5608153118"], "zhejiang")
+
     def test_own_command_is_answered(self):
         bot.dispatch_update(self._update("/oil_start 浙江"))
         self.assertEqual(len(self.sent), 1)
         self.assertIn("浙江", self.sent[0][1])
+
+    def test_missing_chat_type_is_treated_as_group(self):
+        """字段缺失时按最保守处理：纯省份名不认。"""
+        bot.dispatch_update(
+            {"update_id": 1, "message": {"chat": {"id": 5608153118}, "text": "浙江"}}
+        )
+        self.assertEqual(self.sent, [])
+        self.assertEqual(bot.db.subs, {})
 
 
 class TestNonInvasivePolling(unittest.TestCase):

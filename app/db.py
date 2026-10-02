@@ -76,6 +76,13 @@ def init() -> None:
                    created_at TEXT DEFAULT (datetime('now'))
                )"""
         )
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS pending_subscriptions (
+                   chat_id TEXT PRIMARY KEY,
+                   province_slug TEXT NOT NULL,
+                   created_at TEXT DEFAULT (datetime('now'))
+               )"""
+        )
 
 
 def save_snapshot(payload: dict) -> None:
@@ -163,3 +170,37 @@ def list_subscribers() -> list[dict]:
 def subscriber_count() -> int:
     with _session() as conn:
         return conn.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0]
+
+
+# --- 待确认的订阅（私聊里发纯省份名时先问一句）---------------------------
+#
+# 为什么要有这张表而不是直接订阅：这个 bot 与别的项目**共用**，任何用户随手发一句
+# 「北京」都会被静默订阅、并从次日起每天 8:00 收到油价推送 —— 在共用 bot 上这是
+# 越界的打扰。所以纯省份名只记为**意图**，用户明确回一句「是」之后才真订阅。
+# 每个 chat 只保留一条待确认（后发的覆盖前一条），避免堆积成状态机。
+
+
+def set_pending_subscription(chat_id: str, province_slug: str) -> None:
+    with _session(write=True) as conn:
+        conn.execute(
+            "INSERT INTO pending_subscriptions(chat_id, province_slug) VALUES (?, ?) "
+            "ON CONFLICT(chat_id) DO UPDATE SET "
+            "province_slug = excluded.province_slug, created_at = datetime('now')",
+            (str(chat_id), province_slug),
+        )
+
+
+def get_pending_subscription(chat_id: str) -> str | None:
+    with _session() as conn:
+        row = conn.execute(
+            "SELECT province_slug FROM pending_subscriptions WHERE chat_id = ?",
+            (str(chat_id),),
+        ).fetchone()
+    return row[0] if row else None
+
+
+def clear_pending_subscription(chat_id: str) -> None:
+    with _session(write=True) as conn:
+        conn.execute(
+            "DELETE FROM pending_subscriptions WHERE chat_id = ?", (str(chat_id),)
+        )

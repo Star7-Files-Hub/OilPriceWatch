@@ -118,5 +118,50 @@ class TestAddSubscriberKeepsProvince(unittest.TestCase):
         self.assertIsNone(self._subs()["1"])
 
 
+class TestPendingSubscription(unittest.TestCase):
+    """待确认订阅（私聊纯省份名 → 问一句 → 回「是」才订阅）落库语义。
+
+    ⚠️ 同样必须跑**真 sqlite**：这里断言的是 ``ON CONFLICT DO UPDATE`` 的覆盖行为。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved_path = db.DB_PATH
+        db.DB_PATH = Path(self._tmp.name) / "t.db"
+        db.init()
+
+    def tearDown(self):
+        db.DB_PATH = self._saved_path
+        self._tmp.cleanup()
+
+    def test_none_when_absent(self):
+        self.assertIsNone(db.get_pending_subscription("1"))
+
+    def test_set_then_get(self):
+        db.set_pending_subscription("1", "zhejiang")
+        self.assertEqual(db.get_pending_subscription("1"), "zhejiang")
+
+    def test_later_set_overrides(self):
+        """每个 chat 只留一条：后发的省份覆盖前一条，不会堆积成状态机。"""
+        db.set_pending_subscription("1", "zhejiang")
+        db.set_pending_subscription("1", "guangdong")
+        self.assertEqual(db.get_pending_subscription("1"), "guangdong")
+
+    def test_clear(self):
+        db.set_pending_subscription("1", "zhejiang")
+        db.clear_pending_subscription("1")
+        self.assertIsNone(db.get_pending_subscription("1"))
+
+    def test_pending_is_per_chat(self):
+        db.set_pending_subscription("1", "zhejiang")
+        self.assertIsNone(db.get_pending_subscription("2"))
+
+    def test_pending_does_not_subscribe(self):
+        """写待办**不能**顺手把人订阅了 —— 那正是这次要修掉的误伤。"""
+        db.set_pending_subscription("1", "zhejiang")
+        self.assertEqual(db.list_subscribers(), [])
+        self.assertEqual(db.subscriber_count(), 0)
+
+
 if __name__ == "__main__":
     unittest.main()

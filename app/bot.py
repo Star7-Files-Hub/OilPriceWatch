@@ -198,6 +198,11 @@ def _find_province(text: str):
     return config.PROVINCE_BY_SLUG.get(t)
 
 
+def _find_province_by_slug(slug: str):
+    """按 slug 反查省份（待确认订阅里存的是 slug，确认时要还原成省份）。"""
+    return config.PROVINCE_BY_SLUG.get(slug)
+
+
 _PROVINCE_RE = re.compile(r"^[\u4e00-\u9fa5]{2,4}$")
 
 #: 本项目在共用 bot 上**独占**的命名空间前缀。所有命令都挂在这下面。
@@ -223,7 +228,8 @@ def _help_text() -> str:
         "· /oil_start 浙江 订阅并指定省份\n"
         "· /oil_province 浙江 改省份\n"
         "· /oil_stop 取消订阅\n"
-        "· 也可以直接发一个省份名（如「浙江」）\n\n"
+        f"· 私聊里直接发「省份名」（如「浙江」）也行：会先问你一句确认再订阅"
+        "（群里不认，免得误伤别人的对话）\n\n"
         f"每天 {daily_hour()}:00 推一次当日走向"
         "（新一轮调价窗口开启时另有一次提醒），其余时间不打扰。"
     )
@@ -237,12 +243,34 @@ _UNKNOWN_OIL_TEXT = (
     "· /oil_help 看说明"
 )
 
+#: 「是」/「否」的口语说法。**只在有本项目待确认订阅时**才会被响应（见 handle_text），
+#: 而且只认孤立的短词 —— 别把「是的我在北京」这种闲聊也算进来。
+_CONFIRM_YES = frozenset(
+    {"是", "是的", "好", "好的", "要", "确认", "订阅", "同意", "y", "yes", "ok"}
+)
+_CONFIRM_NO = frozenset(
+    {"否", "不", "不用", "不要", "别", "取消", "算了", "n", "no"}
+)
+
+
+def is_confirmation(text: str) -> bool:
+    """这句话是不是「是/否」这类确认词（大小写、首尾空白不敏感）。"""
+    return (text or "").strip().lower() in (_CONFIRM_YES | _CONFIRM_NO)
+
+
+def _subscribed_reply(p) -> str:
+    return (
+        f"已订阅 ⛽\n省份：{p.name}\n"
+        f"每天 {daily_hour()}:00 推当日油价走向，"
+        "新一轮调价窗口开启时另有一次提醒。/oil_stop 退订。"
+    )
+
 
 def parse_command(text: str) -> tuple[str, str] | None:
     """把一条消息解析成「**本项目自己的**命令」。
 
     返回 ``(动作, 参数)``；**不是本项目的消息一律返回 None**，调用方必须保持完全沉默。
-    动作取值：``help`` / ``start`` / ``stop`` / ``province`` / ``unknown``。
+    动作取值：``help`` / ``start`` / ``stop`` / ``province`` / ``province_plain`` / ``unknown``。
 
     只认两类输入，别的连看都不看：
 
@@ -252,6 +280,10 @@ def parse_command(text: str) -> tuple[str, str] | None:
        那是别的项目的命令，我们既不回复也不记日志刷屏。
     2. **恰好等于某个省份名**的纯文本（``浙江`` / ``广东省``），这是本项目的省份设置入口。
        其它任何文本（闲聊、别的项目的关键词）都返回 None。
+
+    ⚠️ 纯省份名与 ``/oil_province`` 必须**分成两个动作**（``province_plain`` / ``province``）：
+       前者的处理更保守（只在私聊认、且要先问一句确认），后者是用户明确敲的命令，
+       直接生效。以前两者都返回 ``province``，逻辑上根本分不开。
 
     ⚠️ 这就是「只回自己的命令」的落点：命名空间内的未知命令才给提示（撞不到别人），
        命名空间外的世界一律沉默 —— **绝不回「未知命令」这种公共话术**。
@@ -272,16 +304,26 @@ def parse_command(text: str) -> tuple[str, str] | None:
         return (action, rest.strip())
 
     if _PROVINCE_RE.match(cmd) and _find_province(cmd):
-        return ("province", cmd)
+        return ("province_plain", cmd)
     return None
 
 
-def handle_text(chat_id, text: str) -> str | None:
+def handle_text(chat_id, text: str, chat_type: str = "private") -> str | None:
     """处理一条消息文本，返回要回复的内容（**None 表示不回复，必须沉默**）。
 
     不碰网络；订阅状态写入 db。命令识别全部委托给 :func:`parse_command`，
     这里只负责「认得的命令该回什么」。
+
+    ``chat_type`` 是 Telegram 的 ``chat.type``（``private`` / ``group`` /
+    ``supergroup`` / ``channel``）。**纯省份名只在私聊里认**：在群里，任何人随手发一句
+    「北京」都不该被这个共用 bot 接过去订阅、更不该往群里回一句油价话术。
+    显式命令（``/oil_*``）不区分场合，照常工作。
     """
+    # 「是/否」这类确认词先处理：它们不是命令（parse_command 会返回 None），
+    # 但只有**本项目先问过一句**（有 pending 记录）时才会被响应，否则沉默。
+    if is_confirmation(text):
+        return _handle_confirmation(chat_id, text)
+
     parsed = parse_command(text)
     if parsed is None:
         return None
@@ -302,7 +344,26 @@ def handle_text(chat_id, text: str) -> str | None:
 
     if action == "stop":
         db.remove_subscriber(str(chat_id))
+        db.clear_pending_subscription(str(chat_id))
         return "已取消订阅。需要时发 /oil_start 重新订阅。"
+
+    if action == "province_plain":
+        # 🔴 群里一律不认（也不订阅、也不回复）：这是共用 bot 上最容易误伤别人的入口。
+        if chat_type != "private":
+            logger.debug(
+                "群里收到纯省份名，按约定静默忽略 chat=%s type=%s", chat_id, chat_type
+            )
+            return None
+        p = _find_province(arg)
+        if not p:
+            return None
+        # 只记「意图」，等用户明确回一句「是」才真订阅。
+        db.set_pending_subscription(str(chat_id), p.slug)
+        return (
+            f"📍 要订阅【{p.name}】的每日油价走向吗？\n"
+            "回复「是」确认，回复「否」取消。\n"
+            f"（也可以直接用 /oil_start {p.name} 订阅）"
+        )
 
     if action == "start":
         if arg:
@@ -310,27 +371,49 @@ def handle_text(chat_id, text: str) -> str | None:
             if not p:
                 return "没认出这个省份，试试「浙江」「广东」这样的全称。"
             db.add_subscriber(str(chat_id), p.slug)
-            return (
-                f"已订阅 ⛽\n省份：{p.name}\n"
-                f"每天 {daily_hour()}:00 推当日油价走向，"
-                "新一轮调价窗口开启时另有一次提醒。/oil_stop 退订。"
-            )
+            db.clear_pending_subscription(str(chat_id))
+            return _subscribed_reply(p)
         db.add_subscriber(str(chat_id))
         return (
             f"已订阅 ⛽\n\n"
             f"· 每天 {daily_hour()}:00 推当日油价走向\n"
             "· 新一轮调价窗口开启时另有一次提醒\n"
-            "· 发「省份名」或 /oil_province 浙江 设置你所在的省份\n"
+            "· 发「省份名」或 /oil_province 浙江 设置你所在的省份（群里请用命令，纯省份名只在私聊生效）\n"
             "· /oil_today 随时查看今日走向\n"
             "· /oil_stop 取消订阅"
         )
 
-    # action == "province"
+    # action == "province"（显式 /oil_province 浙江：用户敲了明确命令 ⇒ 直接生效）
     p = _find_province(arg)
     if not p:
         return "没认出这个省份，试试「浙江」「广东」这样的全称。"
     db.add_subscriber(str(chat_id), p.slug)
+    db.clear_pending_subscription(str(chat_id))
     return f"已把你所在的省份设为 {p.name} ✅\n调价提醒将按 {p.name} 的油价播报。"
+
+
+def _handle_confirmation(chat_id, text: str) -> str | None:
+    """处理「是/否」：**只有本项目先问过一句**（存在 pending 记录）时才回应。
+
+    没有 pending 就返回 None（沉默）—— 共用 bot 上别人的对话里出现「是」太常见了，
+    我们没有任何资格去接话。pending 只可能由 :func:`handle_text` 的私聊省份分支写下。
+    """
+    slug = db.get_pending_subscription(str(chat_id))
+    if not slug:
+        return None
+
+    if (text or "").strip().lower() in _CONFIRM_NO:
+        db.clear_pending_subscription(str(chat_id))
+        return "好的，已取消，不会给你推送。"
+
+    p = _find_province_by_slug(slug)
+    if not p:
+        # 省份表变了导致认不出来：清掉待办，别把用户卡在一个永远确认不了的状态里。
+        db.clear_pending_subscription(str(chat_id))
+        return "这个省份暂时认不出来了，请用 /oil_start 重新订阅。"
+    db.add_subscriber(str(chat_id), p.slug)
+    db.clear_pending_subscription(str(chat_id))
+    return _subscribed_reply(p)
 
 
 def dispatch_update(update: dict) -> None:
@@ -339,21 +422,29 @@ def dispatch_update(update: dict) -> None:
     🔴 **不是本项目的更新一律静默丢弃**（只留一行 debug）：这个 bot 被多个项目共用，
     踢回来的任何一条更新都可能是别人的命令，我们没有任何资格去回一句
     「未知命令」—— 那正是之前 `/status` 被抢答成油价欢迎语的原因。
+
+    「是/否」这类确认词也放行进 :func:`handle_text`，但**只有本项目先问过一句**
+    （该 chat 有 pending 订阅记录）时才会真回复，否则那一层直接返回 None ——
+    共用 bot 上别人的对话里出现「是」太常见，不能接话。
     """
     message = update.get("message") or update.get("edited_message")
     if not message:
         return
     chat = message.get("chat", {})
     chat_id = chat.get("id")
+    # Telegram 一定会给 chat.type；缺字段时按**最保守**的群聊处理（纯省份名不认）。
+    chat_type = chat.get("type") or "group"
     text = (message.get("text") or "").strip()
     if chat_id is None or not text:
         return
-    if parse_command(text) is None:
+    if parse_command(text) is None and not is_confirmation(text):
         logger.debug("非本项目命令，静默忽略 chat=%s text=%r", chat_id, text[:30])
         return
     t0 = time.monotonic()
-    logger.info("收到本项目命令 chat=%s text=%r", chat_id, text[:30])
-    reply = handle_text(chat_id, text)
+    logger.info(
+        "收到本项目消息 chat=%s type=%s text=%r", chat_id, chat_type, text[:30]
+    )
+    reply = handle_text(chat_id, text, chat_type)
     if reply:
         send_message(chat_id, reply)
     logger.info(
@@ -750,8 +841,9 @@ def _poll_loop(token: str, stop: threading.Event) -> None:
                 last_backlog_warn = now
                 logger.warning(
                     "未确认更新已压到一页上限 %d 条（共用 bot 收到大量频道贴，属预期）；"
-                    "不推进 offset 也不设 allowed_updates ⇒ 页面被占满属正常，"
-                    "只要队列不超过 limit，本项目自己的消息仍能被取到。",
+                    "不推进 offset 也不设 allowed_updates ⇒ 页面长期贴着上限，"
+                    "此时**最新**的更新要等老更新 24h 过期后才可见（延迟，不丢）。"
+                    "想消除延迟见 OILWATCH_TG_ALLOW_OFFSET。",
                     len(updates),
                 )
             elif now - last_backlog_warn >= _BACKLOG_WARN_INTERVAL:
