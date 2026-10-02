@@ -135,5 +135,32 @@ class TestWebhookAuth(_WebhookEnv):
         self.assertEqual(self._pending(), [])
 
 
+class TestAdminTokenWarning(unittest.TestCase):
+    """``ADMIN_TOKEN`` 为空是 fail-open，保留但必须**显眼**（启动即 WARNING）。"""
+
+    def test_warns_when_admin_token_missing(self):
+        from app import main as main_mod
+
+        saved = main_mod.ADMIN_TOKEN
+        main_mod.ADMIN_TOKEN = None
+        try:
+            with self.assertLogs("oilwatch.api", level="WARNING") as cm:
+                main_mod._warn_insecure_config()
+            self.assertIn("OILWATCH_ADMIN_TOKEN", "\n".join(cm.output))
+        finally:
+            main_mod.ADMIN_TOKEN = saved
+
+    def test_silent_when_admin_token_set(self):
+        from app import main as main_mod
+
+        saved = main_mod.ADMIN_TOKEN
+        main_mod.ADMIN_TOKEN = "something"
+        try:
+            with self.assertNoLogs("oilwatch.api", level="WARNING"):
+                main_mod._warn_insecure_config()
+        finally:
+            main_mod.ADMIN_TOKEN = saved
+
+
 if __name__ == "__main__":
     unittest.main()

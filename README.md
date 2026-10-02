@@ -248,7 +248,7 @@ deploy/            systemd / nginx / .env 示例
 ## 测试
 
 ```bash
-pytest tests/ -q      # 161 passed
+pytest tests/ -q      # 163 passed
 ```
 
 覆盖调价窗口推算与节假日、预测文案解析与方向归一化、省份判定（41 个城市用例，

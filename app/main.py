@@ -33,7 +33,23 @@ ADMIN_TOKEN = os.environ.get("OILWATCH_ADMIN_TOKEN")  # 不设则关闭保护（
 # 冷启动：无缓存、或缓存整体不可用（覆盖 0）时，先抓一次把数据垫上。
 # 覆盖 0 也要重抓，是因为上一次抓取可能因上游问题（如证书/限流）整批失败，
 # 若只判 `is None` 会把这份坏快照一直服务到下次定时刷新。
+def _warn_insecure_config() -> None:
+    """把「不安全但被允许」的配置在启动时喊出来。
+
+    ``OILWATCH_ADMIN_TOKEN`` 为空是 **fail-open**（写接口对所有人放行），保留它是为了
+    本地调试方便。但 fail-open 的默认值必须显眼：2026-10-03 复核发现同一个坑的另一半
+    —— ``/webhook/tg`` 的 ``if secret and ...`` 在 secret 为空时短路，结果公网可写。
+    所以这里不阻止启动，但每次都打 WARNING，让 ``journalctl`` 里躲不掉。
+    """
+    if not ADMIN_TOKEN:
+        logger.warning(
+            "未设置 OILWATCH_ADMIN_TOKEN ⇒ /api/refresh 与 /api/settings/anchor "
+            "对所有人放行（这是 fail-open，不是「可选」）；公网部署必须设。"
+        )
+
+
 def _bootstrap() -> None:
+    _warn_insecure_config()
     db.init()
     snap = db.latest()
     if snap is None or _coverage(snap) == 0:
