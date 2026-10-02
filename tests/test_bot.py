@@ -511,6 +511,117 @@ class TestDailyPush(_PushHarness):
         self.assertEqual(r["reason"], "no_window")
         self.assertEqual(self.sent, [])
 
+    def test_partial_delivery_is_logged_not_silent(self):
+        """``sent>0`` 只是「至少送出一个」。2 个订阅者只成功 1 个时必须告警。
+
+        否则「部分失败」和「全部成功」在日志上完全一样 —— 与 9/28 那次
+        「0 送达却若无其事地落键」是同一类盲区（验证者发现的 P4）。
+        """
+        self.db.subs = {"1": None, "2": None}  # subscriber_count() == 2
+        self.recipients = 1
+        with self.assertLogs("oilwatch.bot", level="WARNING") as cm:
+            r = bot.maybe_daily_push(self.SNAP, now=self.at(8))
+        self.assertEqual(r["pushed"], 1)
+        self.assertTrue(
+            any("部分失败" in m for m in cm.output), f"部分失败没告警: {cm.output}"
+        )
+
+    def test_all_delivered_does_not_warn(self):
+        self.db.subs = {"1": None, "2": None}
+        self.recipients = 2
+        # assertNoLogs 而不是 assertLogs：后者要求「至少有一条」，全成功时反而会报错。
+        with self.assertNoLogs("oilwatch.bot", level="WARNING"):
+            r = bot.maybe_daily_push(self.SNAP, now=self.at(8))
+        self.assertEqual(r["pushed"], 2)
+
+
+class TestDailyTimeZone(unittest.TestCase):
+    """回归（验证者发现的盲区）：所有测试都显式传 ``now=`` 或自建 CST 时间，
+
+    于是把 ``Asia/Shanghai`` 写成 ``UTC`` 也全绿 —— 而线上会变成 16:00 CST 才推。
+    """
+
+    def test_now_cn_is_shanghai(self):
+        now = bot._now_cn()
+        self.assertEqual(str(now.tzinfo), "Asia/Shanghai")
+        self.assertEqual(now.utcoffset().total_seconds(), 8 * 3600)
+
+    def test_scheduler_timezone_is_shanghai(self):
+        from app import scheduler
+
+        self.assertEqual(str(scheduler._scheduler.timezone), "Asia/Shanghai")
+
+
+class TestOffsetOptIn(unittest.TestCase):
+    """默认**不推进 offset**；只有显式 ``OILWATCH_TG_ALLOW_OFFSET=1`` 才确认水位。
+
+    这是给「确认过该 token 上没有别的项目用 Bot API getUpdates」之后留的闸门：
+    开闸后积压会被清空、长轮询才真正生效（命令秒级可达），代价是会影响别的消费者。
+    """
+
+    def setUp(self):
+        self._saved = (
+            bot.db,
+            bot._post,
+            bot.dispatch_update,
+            bot.time.sleep,
+            os.environ.get("OILWATCH_TG_ALLOW_OFFSET"),
+        )
+        os.environ.pop("OILWATCH_TG_ALLOW_OFFSET", None)
+        self.payloads = []
+
+    def tearDown(self):
+        bot.db, bot._post, bot.dispatch_update, bot.time.sleep = self._saved[:4]
+        if self._saved[4] is None:
+            os.environ.pop("OILWATCH_TG_ALLOW_OFFSET", None)
+        else:
+            os.environ["OILWATCH_TG_ALLOW_OFFSET"] = self._saved[4]
+
+    def _run(self, batches, seen=None):
+        db = _FakeDB()
+        if seen:
+            db.settings[bot._SEEN_KEY] = json.dumps(seen)
+        bot.db = db
+        bot.dispatch_update = lambda u: None
+        it = iter(batches)
+        rounds = {"n": 0}
+
+        def fake_post(token, method, payload, *a, **kw):
+            self.payloads.append(dict(payload))
+            return {"ok": True, "result": next(it, [])}
+
+        stop = threading.Event()
+
+        def fake_sleep(_s):
+            rounds["n"] += 1
+            if rounds["n"] >= len(batches):
+                stop.set()
+
+        bot._post = fake_post
+        bot.time.sleep = fake_sleep
+        bot._poll_loop("tok", stop)
+
+    def test_default_is_off(self):
+        self._run([[{"update_id": 7, "message": {}}], []], seen=[5])
+        self.assertTrue(self.payloads)
+        for p in self.payloads:
+            self.assertNotIn("offset", p, "默认档居然传了 offset")
+
+    def test_enabled_advances_watermark(self):
+        os.environ["OILWATCH_TG_ALLOW_OFFSET"] = "1"
+        self._run(
+            [[{"update_id": 7, "message": {}}], [{"update_id": 9, "message": {}}]],
+            seen=[5],
+        )
+        self.assertEqual(self.payloads[0]["offset"], 6, "没从本地去重表推出起始水位")
+        self.assertEqual(self.payloads[1]["offset"], 8, "处理完 7 之后水位没推进")
+
+    def test_never_carries_allowed_updates_even_when_enabled(self):
+        os.environ["OILWATCH_TG_ALLOW_OFFSET"] = "1"
+        self._run([[{"update_id": 7, "message": {}}], []], seen=[5])
+        for p in self.payloads:
+            self.assertNotIn("allowed_updates", p, "开闸也不许碰 allowed_updates")
+
 
 class TestCyclePushKey(_PushHarness):
     """周期推送的幂等键同样必须「送达后才落」。"""

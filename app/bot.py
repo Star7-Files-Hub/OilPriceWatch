@@ -455,6 +455,11 @@ def maybe_push(snapshot: dict) -> dict:
             db.subscriber_count(),
         )
         return {"pushed": 0, "reason": "no_recipient"}
+    total = db.subscriber_count()
+    if sent < total:
+        logger.warning(
+            "新一轮窗口推送部分失败：%d/%d 名订阅者收到", sent, total
+        )
     db.set_setting("tg_last_cycle_next", w["next_date"])
     return {"pushed": sent, "reason": "new_cycle"}
 
@@ -522,6 +527,16 @@ def maybe_daily_push(snapshot: dict, now: datetime | None = None) -> dict:
             db.subscriber_count(),
         )
         return {"pushed": 0, "reason": "no_recipient"}
+    # ⚠️ `sent > 0` 的准确含义是「**至少**成功送出一个」。2 个订阅者只成功 1 个时，
+    #    另一个当天就静默丢了 —— 落键前必须把这个部分失败**喊出来**，
+    #    否则它和「全部成功」在日志上完全一样（这正是 9/28 那次事故难以发现的同款盲区）。
+    total = db.subscriber_count()
+    if sent < total:
+        logger.warning(
+            "每日油价走向部分失败：%d/%d 名订阅者收到（其余今天不会再补发）",
+            sent,
+            total,
+        )
     db.set_setting(_DAILY_KEY, today)
     return {"pushed": sent, "reason": "daily"}
 
@@ -542,6 +557,34 @@ _FETCH_LIMIT = 100
 
 #: 积压提示的最小间隔（秒）。没有它时**每轮**都打，4 天刷了 63896 行日志。
 _BACKLOG_WARN_INTERVAL = 3600.0
+
+
+def _offset_enabled() -> bool:
+    """是否允许推进 offset。**默认关闭**，这是共用 bot 的安全档。
+
+    为什么要留这个开关：不推进 offset ⇒ Telegram 永不删除更新 ⇒ 频道贴
+    （tg-assistant 通知频道的 channel_post）会**长期把一页(100 条)顶满**
+    （2026-10-02 线上采样：抽到的历史页面里 68% 正好取满 100 条），
+    此时最新的几条（很可能就是用户的命令）要等老更新 24 小时过期后才可见
+    —— **不会丢，但会延迟**（典型十几分钟，突发时可达数小时）。
+    打开后会确认水位、把积压清掉，长轮询也才真正生效（命令秒级可达、日志干净）。
+
+    ⚠️ 打开的前提：**确认这个 token 上再没有别的项目用 Bot API 的 getUpdates**。
+    线上 tg-assistant 走 pyrogram/MTProto 用户账号转发，不受影响；但这是「共用
+    token」的约定，必须由人确认后再开（见 README「机器人是共用的」）。
+    """
+    return os.environ.get("OILWATCH_TG_ALLOW_OFFSET", "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
+
+
+def _initial_offset(seen: list[int]) -> int | None:
+    """开闸时从本地去重表推出起始水位；没开闸（默认）返回 None ⇒ 不传 offset。"""
+    if not _offset_enabled() or not seen:
+        return None
+    return max(seen) + 1
 
 #: 没有新消息时的退避秒数。可调：``OILWATCH_TG_POLL_IDLE_SLEEP``。
 _DEFAULT_IDLE_SLEEP = 2.0
@@ -596,7 +639,12 @@ def start_polling() -> threading.Event | None:
         return None
     stop = threading.Event()
     threading.Thread(target=_poll_loop, args=(token, stop), daemon=True).start()
-    logger.info("TG 轮询已启动（非侵入式：不推进 offset，只处理 /oil* 命令）")
+    logger.info(
+        "TG 轮询已启动（%s；只处理 /oil* 命令）",
+        "**开闸**：会推进 offset，影响共用该 token 的其它 getUpdates 消费者"
+        if _offset_enabled()
+        else "非侵入式：不推进 offset、不设 allowed_updates",
+    )
     return stop
 
 
@@ -618,17 +666,35 @@ def _poll_loop(token: str, stop: threading.Event) -> None:
     🔴 **也绝不能传 ``allowed_updates``** —— 这是 2026-10-02 实测踩到的第二个坑，
     比 offset 更阴：它**看起来**只是「本次只收某几类更新」，但 Telegram 会把它
     **写成按 token 全局且持久**的订阅设置（``getWebhookInfo`` 的 ``allowed_updates``
-    字段会跟着变），而且**之后不传该参数并不会恢复**。
+    字段会跟着变），而且**之后不传该参数并不会恢复**（官方文档原话：
+    "If not specified, the previous setting will be used."）。
     实测：传 ``["callback_query"]`` ⇒ 全局变成 ``["callback_query"]``；再调用一次
-    **不带**该参数，全局仍是 ``["callback_query"]``。
+    **不带**该参数，全局仍是 ``["callback_query"]``。而且它**功能上真的会压制**其它类型
+    （隔离实验：设成「除 channel_post 外全部」后，频道发送方计数 +1 而对应更新始终没进队列）。
     后果是别的项目（或将来新增的 callback/频道场景）会**静默**收不到那类更新，
     且极难排查 —— 与「绝不碰全局状态」的红线直接冲突。
-    ⇒ 结论：这个共用 bot 的订阅面**只能保持默认（全部类型）**，
-      频道贴(``channel_post``)刷屏只能忍。它的实际影响（2026-10-02 线上采样）：
-      未确认队列长度在 93~97 之间波动，从未超过 ``limit=100``（历史上页面取满过 100 条，
-      说明队列曾达到 100）。只要队列不超过 limit，一页就能覆盖整个队列，
-      我们自己的消息不会被挡在后面；即便某一刻超过，因为**不确认任何更新**，
-      消息也不会丢，只是晚几条才可见（最坏是延迟，不是丢失）。
+
+    ⇒ 结论：这个共用 bot 的订阅面**只能保持默认**（官方默认 = 全部类型，**除**
+      ``chat_member`` / ``message_reaction`` / ``message_reaction_count``）；
+      频道贴(``channel_post``)刷屏只能忍。它的真实代价（2026-10-02 线上测量，
+      经独立验证者复核）：
+      · 页面**经常被顶满**：抽取的历史日志里 **68% 的页面正好 100 条**（=limit），
+        说明队列长期贴着上限（当天 15 次低谷采样 93~97，不代表常态）；
+      · 超限时被截掉的是**最新**的更新（getUpdates 从最老未确认开始返回）⇒
+        用户的命令**看不见但不会丢**：等更老的更新 24 小时过期腾出位置后仍会被取到
+        （典型延迟十几分钟，突发时可达数小时，最坏接近 24h）。
+        想彻底消除这个延迟，见 :func:`_offset_enabled`（``OILWATCH_TG_ALLOW_OFFSET=1``）。
+
+    ⚠️ 还原 ``allowed_updates`` 的判据陷阱：官方文档写明该参数
+    "doesn't affect updates created before the call"，而本服务**从不确认**任何更新
+    ⇒ 老积压永远算「调用之前创建的更新」⇒ **无论过滤是否生效，channel_post 都会照常返回**。
+    所以「还原后又能收到 channel_post」**不构成**还原成功的证据；唯一有效判据是
+    ``getWebhookInfo.allowed_updates`` 字段本身是否回到缺失/空。
+    （还原写法：``getUpdates`` 传 ``allowed_updates=[]``，空列表即官方默认。）
+
+    ⚠️ 另一个实测现象：**同一 token 上并发 getUpdates 会互相抢页** —— 串行调用稳定返回
+    整页，并发 3 个请求时出现过 ``(99, 1, 1)``，落单者只拿到最老那一条。
+    所以排查时别一边跑服务一边手工 getUpdates，会把服务的页面抢成残页。
 
     不传 offset 的代价与对策：
     · Telegram 会**反复返回同一批未确认更新** ⇒ 本地用 update_id 去重（持久化到
@@ -642,16 +708,25 @@ def _poll_loop(token: str, stop: threading.Event) -> None:
     idle = _idle_sleep()
     last_backlog_warn = 0.0
     backlog_warned = False
-    logger.info("轮询去重表已载入 %d 条历史 update_id", len(seen))
+    # None = 不传 offset（默认档，共用 bot 的安全档）；整数 = 要确认到的水位（显式开闸）。
+    offset = _initial_offset(seen)
+    logger.info(
+        "轮询去重表已载入 %d 条历史 update_id（推进 offset：%s）",
+        len(seen),
+        "开" if offset is not None else "关",
+    )
 
     while not stop.is_set():
         # ⚠️ 客户端超时必须 > 长轮询 timeout(30)，否则每轮都在服务端还没返回时
         #    先 read timeout，导致更新永远收不到（实测 10s 默认超时必炸）。
-        # ⚠️ 故意不传 offset，也**故意不传 allowed_updates**（两者都是全局状态）。
+        # ⚠️ 默认既不传 offset，也**从不传 allowed_updates**（两者都是全局状态）。
+        payload = {"timeout": 30, "limit": _FETCH_LIMIT}
+        if offset is not None:
+            payload["offset"] = offset
         resp = _post(
             token,
             "getUpdates",
-            {"timeout": 30, "limit": _FETCH_LIMIT},
+            payload,
             timeout=40,
             retry_transport=True,
         )
@@ -665,8 +740,8 @@ def _poll_loop(token: str, stop: threading.Event) -> None:
         if len(updates) >= _FETCH_LIMIT:
             # 这个 bot 同时是 tg-assistant 通知频道 Notify(-1002626018568) 的成员，
             # 频道每发一条就产生一条 channel_post，把这一页占满。属**预期噪音**：
-            # 线上采样（2026-10-02）队列长度 93~97、未超过 limit ⇒ 一页覆盖全队列；
-            # 就算某一刻超了，因为不确认任何更新，我们的消息也只会晚几条可见、不会丢。
+            # 线上抽样：68% 的页面正好 100 条 ⇒ 队列长期贴着上限，最新的更新
+            # 要等老更新 24h 过期后才可见（**延迟，不丢**）；想彻底消除见 _offset_enabled。
             # ⚠️ 曾经每轮都打这行 ⇒ 4 天刷了 63896 行日志。现在：进程内第一次 WARNING，
             #    之后每小时最多 INFO 一条。
             now = time.monotonic()
@@ -708,6 +783,11 @@ def _poll_loop(token: str, stop: threading.Event) -> None:
             _save_seen(seen)
         except Exception as exc:  # noqa: BLE001
             logger.warning("持久化去重表失败（本次仍生效）: %s", exc)
+
+        # 仅当显式开闸（OILWATCH_TG_ALLOW_OFFSET=1）才推进确认水位。
+        # 推进后 Telegram 会把这些更新彻底删掉、长轮询也随之生效（队列排空、命令秒级可达）。
+        if offset is not None and updates:
+            offset = max(u.get("update_id", 0) for u in updates) + 1
 
         # 复用连接后这个间隔只为让出 GIL / 防止空转，不需要再靠它兜握手时间。
         time.sleep(0.05)
