@@ -38,6 +38,8 @@ import os
 import re
 import threading
 import time
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -205,23 +207,30 @@ _NAMESPACE = "/oil"
 _COMMANDS: dict[str, str] = {
     "/oil": "help",
     "/oil_help": "help",
+    "/oil_today": "today",
     "/oil_start": "start",
     "/oil_stop": "stop",
     "/oil_province": "province",
 }
 
-_HELP_TEXT = (
-    "⛽ 油价监控 · 可用命令（都带 /oil 前缀，避免和别的机器人撞车）\n\n"
-    "· /oil_start 订阅全国油价提醒\n"
-    "· /oil_start 浙江 订阅并指定省份\n"
-    "· /oil_province 浙江 改省份\n"
-    "· /oil_stop 取消订阅\n"
-    "· 也可以直接发一个省份名（如「浙江」）\n\n"
-    "新一轮调价窗口开启时推送一次，其余时间不打扰。"
-)
+def _help_text() -> str:
+    """帮助文案。**用函数而不是常量**：每天几点推是可以配的（``daily_hour()``），
+    写成模块级常量会在导入期就把时间点钉死（甚至 NameError）。"""
+    return (
+        "⛽ 油价监控 · 可用命令（都带 /oil 前缀，避免和别的机器人撞车）\n\n"
+        "· /oil_today 现在往哪走（今日走向）\n"
+        "· /oil_start 订阅每日油价走向\n"
+        "· /oil_start 浙江 订阅并指定省份\n"
+        "· /oil_province 浙江 改省份\n"
+        "· /oil_stop 取消订阅\n"
+        "· 也可以直接发一个省份名（如「浙江」）\n\n"
+        f"每天 {daily_hour()}:00 推一次当日走向"
+        "（新一轮调价窗口开启时另有一次提醒），其余时间不打扰。"
+    )
 
 _UNKNOWN_OIL_TEXT = (
     "这条命令我不认识。可用：\n"
+    "· /oil_today 今日走向\n"
     "· /oil_start [省份] 订阅\n"
     "· /oil_province 省份 改省份\n"
     "· /oil_stop 取消订阅\n"
@@ -279,10 +288,17 @@ def handle_text(chat_id, text: str) -> str | None:
     action, arg = parsed
 
     if action == "help":
-        return _HELP_TEXT
+        return _help_text()
 
     if action == "unknown":
         return _UNKNOWN_OIL_TEXT
+
+    if action == "today":
+        # 手动查「现在往哪走」—— 不依赖推送，随时可看（也是推送出问题时的自检入口）。
+        snap = db.latest()
+        if not snap or not snap.get("window"):
+            return "数据还没准备好（上游刚抓取失败或服务刚启动），过几分钟再试。"
+        return build_digest(snap, title=f"⛽ 今日油价走向 · {_now_cn().date().isoformat()}")
 
     if action == "stop":
         db.remove_subscriber(str(chat_id))
@@ -295,14 +311,17 @@ def handle_text(chat_id, text: str) -> str | None:
                 return "没认出这个省份，试试「浙江」「广东」这样的全称。"
             db.add_subscriber(str(chat_id), p.slug)
             return (
-                f"已订阅全国油价提醒 ⛽\n省份：{p.name}\n"
-                "新一轮调价窗口开启时会推送提醒。/oil_stop 退订。"
+                f"已订阅 ⛽\n省份：{p.name}\n"
+                f"每天 {daily_hour()}:00 推当日油价走向，"
+                "新一轮调价窗口开启时另有一次提醒。/oil_stop 退订。"
             )
         db.add_subscriber(str(chat_id))
         return (
-            "已订阅全国油价提醒 ⛽\n\n"
+            f"已订阅 ⛽\n\n"
+            f"· 每天 {daily_hour()}:00 推当日油价走向\n"
+            "· 新一轮调价窗口开启时另有一次提醒\n"
             "· 发「省份名」或 /oil_province 浙江 设置你所在的省份\n"
-            "· 新一轮调价窗口开启时会主动推送提醒\n"
+            "· /oil_today 随时查看今日走向\n"
             "· /oil_stop 取消订阅"
         )
 
@@ -345,12 +364,12 @@ def dispatch_update(update: dict) -> None:
 # --- 推送 ---------------------------------------------------------------
 
 
-def build_digest(snapshot: dict) -> str:
+def build_digest(snapshot: dict, title: str = "⛽ 油价播报 · 新一轮调价窗口开启") -> str:
     f = snapshot.get("forecast") or {}
     selfd = f.get("self")
     site = f.get("site")
     w = snapshot.get("window")
-    lines = ["⛽ 油价播报 · 新一轮调价窗口开启"]
+    lines = [title]
     if selfd:
         arrow = "↑" if selfd["direction"] == "上调" else "↓"
         lines.append(
@@ -411,10 +430,14 @@ def broadcast(text: str, snapshot: dict | None = None) -> int:
 
 
 def maybe_push(snapshot: dict) -> dict:
-    """在 schedule 刷新后调用：新一轮周期开启才广播一次。
+    """新一轮调价窗口开启时广播一次。
 
-    用 settings 里的 tg_last_cycle_next 记录上次广播过的 next_date，
-    变了就播（说明已进入下一轮调价窗口），没变就不播。
+    🔴 **幂等键只在「确实送出去」之后才落**（`sent > 0`）。旧写法反过来：先写键、
+    再广播，于是只要「该推的那一刻还没有订阅者」或「发送全军覆没」，整轮就被
+    永久静默掉了 —— 线上 2026-09-28 正是如此：21:14 首次刷新得到
+    next_date=2026-10-15，21:43 的巡检在没有**任何**订阅者时把键写了，
+    用户 22:16 才订阅，结果接下来 17 天一条推送都收不到。
+    现在改成：没送出去就不落键 ⇒ 下一个 30 分钟的巡检会继续重试，不会静默度过这一轮。
     """
     if not get_token():
         return {"pushed": 0, "reason": "no_token"}
@@ -426,8 +449,81 @@ def maybe_push(snapshot: dict) -> dict:
         return {"pushed": 0, "reason": "no_change"}
     text = build_digest(snapshot)
     sent = broadcast(text, snapshot)
+    if sent <= 0:
+        logger.info(
+            "新一轮窗口已开启但无人可送（订阅者 %d 个）⇒ 不落幂等键，下次巡检重试",
+            db.subscriber_count(),
+        )
+        return {"pushed": 0, "reason": "no_recipient"}
     db.set_setting("tg_last_cycle_next", w["next_date"])
     return {"pushed": sent, "reason": "new_cycle"}
+
+
+# --- 每日「油价走向」推送 -------------------------------------------------
+#
+# 用户要的是「每天告诉我往哪走」，而 :func:`maybe_push` 只在**调价周期切换**时响一次
+# （每 10 个工作日）—— 两者是互补的，都保留。
+
+#: 每日推送的幂等键：存**已成功推送**的日期（YYYY-MM-DD，Asia/Shanghai）。
+_DAILY_KEY = "tg_last_daily_date"
+
+#: 每日推送的默认时间（小时，Asia/Shanghai）。
+DEFAULT_DAILY_HOUR = 8
+
+
+def daily_hour() -> int:
+    """每日推送的时间点（小时）。可用 ``OILWATCH_TG_DAILY_HOUR`` 覆盖。"""
+    raw = os.environ.get("OILWATCH_TG_DAILY_HOUR")
+    if raw is None or not raw.strip():
+        return DEFAULT_DAILY_HOUR
+    try:
+        hour = int(raw)
+    except ValueError:
+        logger.warning("OILWATCH_TG_DAILY_HOUR=%r 不是整数，回退到 %d", raw, DEFAULT_DAILY_HOUR)
+        return DEFAULT_DAILY_HOUR
+    if not 0 <= hour <= 23:
+        logger.warning("OILWATCH_TG_DAILY_HOUR=%r 超出 0-23，回退到 %d", raw, DEFAULT_DAILY_HOUR)
+        return DEFAULT_DAILY_HOUR
+    return hour
+
+
+def _now_cn() -> datetime:
+    return datetime.now(ZoneInfo("Asia/Shanghai"))
+
+
+def maybe_daily_push(snapshot: dict, now: datetime | None = None) -> dict:
+    """每日「油价走向」：每个自然日最多成功推一次。
+
+    什么时候推：**当天还没成功推过**，且**已经过了配置的时间点**。
+    为什么不是「只在整点那一分钟推」：巡检是每 30 分钟一次、服务还可能重启，
+    卡死某个分钟极易漏推。用「>= 时间点 + 当天未推」表达，天然带**补推**能力
+    （服务在 08:00 挂了、10:00 才起来，当天仍然会补上）。
+
+    幂等键与 :func:`maybe_push` 同一条纪律：**送出去了才落**，没订阅者/全失败就保持
+    待发，下一次巡检接着试。
+    """
+    if not get_token():
+        return {"pushed": 0, "reason": "no_token"}
+    if not snapshot.get("window"):
+        return {"pushed": 0, "reason": "no_window"}
+
+    now = now or _now_cn()
+    today = now.date().isoformat()
+    if now.hour < daily_hour():
+        return {"pushed": 0, "reason": "before_hour"}
+    if db.get_setting(_DAILY_KEY) == today:
+        return {"pushed": 0, "reason": "already_sent_today"}
+
+    text = build_digest(snapshot, title=f"⛽ 今日油价走向 · {today}")
+    sent = broadcast(text, snapshot)
+    if sent <= 0:
+        logger.info(
+            "每日油价走向无人可送（订阅者 %d 个）⇒ 不落幂等键，下次巡检重试",
+            db.subscriber_count(),
+        )
+        return {"pushed": 0, "reason": "no_recipient"}
+    db.set_setting(_DAILY_KEY, today)
+    return {"pushed": sent, "reason": "daily"}
 
 
 # --- Polling（无公网地址时的兜底）---------------------------------------
@@ -443,6 +539,9 @@ _SEEN_CAP = 500
 
 #: getUpdates 单次要多少条（Telegram 上限 100）。
 _FETCH_LIMIT = 100
+
+#: 积压提示的最小间隔（秒）。没有它时**每轮**都打，4 天刷了 63896 行日志。
+_BACKLOG_WARN_INTERVAL = 3600.0
 
 #: 没有新消息时的退避秒数。可调：``OILWATCH_TG_POLL_IDLE_SLEEP``。
 _DEFAULT_IDLE_SLEEP = 2.0
@@ -515,21 +614,41 @@ def _poll_loop(token: str, stop: threading.Event) -> None:
       避免空转打 API。
     · 触发长轮询的前提是「队列里没有未确认更新」；有老消息压着时接口会立刻返回，
       所以那点退避是必须的，不是为了省流量。
-    · 去重表只留最近 :data:`_SEEN_CAP` 条。真出现「同时压着几百条未确认更新」时
-      会告警（见下），因为那时 getUpdates 一页取不完，新命令会被老消息挡在后面。
+
+    🔴 **也绝不能传 ``allowed_updates``** —— 这是 2026-10-02 实测踩到的第二个坑，
+    比 offset 更阴：它**看起来**只是「本次只收某几类更新」，但 Telegram 会把它
+    **写成按 token 全局且持久**的订阅设置（``getWebhookInfo`` 的 ``allowed_updates``
+    字段会跟着变），而且**之后不传该参数并不会恢复**。
+    实测：传 ``["callback_query"]`` ⇒ 全局变成 ``["callback_query"]``；再调用一次
+    **不带**该参数，全局仍是 ``["callback_query"]``。
+    后果是别的项目（或将来新增的 callback/频道场景）会**静默**收不到那类更新，
+    且极难排查 —— 与「绝不碰全局状态」的红线直接冲突。
+    ⇒ 结论：这个共用 bot 的订阅面**只能保持默认（全部类型）**，
+      频道贴(``channel_post``)刷屏只能忍（它只占页面，不会让我们的消息消失：
+      一页 ``limit=100`` 能覆盖整个队列，见 :func:`_poll_loop` 里的采样结论）。
+
+    不传 offset 的代价与对策：
+    · Telegram 会**反复返回同一批未确认更新** ⇒ 本地用 update_id 去重（持久化到
+      settings，重启也不重复回复）；取回来全是老消息时主动退避 ``idle_sleep``，
+      避免空转打 API。
+    · 触发长轮询的前提是「队列里没有未确认更新」；有老消息压着时接口会立刻返回，
+      所以那点退避是必须的，不是为了省流量。
     """
     seen = _load_seen()
     seen_set = set(seen)
     idle = _idle_sleep()
+    last_backlog_warn = 0.0
+    backlog_warned = False
     logger.info("轮询去重表已载入 %d 条历史 update_id", len(seen))
 
     while not stop.is_set():
         # ⚠️ 客户端超时必须 > 长轮询 timeout(30)，否则每轮都在服务端还没返回时
         #    先 read timeout，导致更新永远收不到（实测 10s 默认超时必炸）。
+        # ⚠️ 故意不传 offset，也**故意不传 allowed_updates**（两者都是全局状态）。
         resp = _post(
             token,
             "getUpdates",
-            {"timeout": 30, "limit": _FETCH_LIMIT},  # ⚠️ 故意不传 offset
+            {"timeout": 30, "limit": _FETCH_LIMIT},
             timeout=40,
             retry_transport=True,
         )
@@ -541,12 +660,25 @@ def _poll_loop(token: str, stop: threading.Event) -> None:
 
         updates = resp.get("result", [])
         if len(updates) >= _FETCH_LIMIT:
-            logger.warning(
-                "未确认更新已压到 %d 条（取回上限）：不推进 offset 的前提下，"
-                "更新的命令会被这一页老消息挡在后面。需要人工确认是否有人在用 "
-                "getUpdates 消费这个共用 bot。",
-                len(updates),
-            )
+            # 这个 bot 同时是 tg-assistant 通知频道 Notify(-1002626018568) 的成员，
+            # 频道每发一条就产生一条 channel_post，把这一页占满。属**预期噪音**：
+            # 线上采样确认队列长度稳定在 ~99-100 且不超过 limit，一页能覆盖全队列，
+            # 所以我们的消息不会被挡在后面。
+            # ⚠️ 曾经每轮都打这行 ⇒ 4 天刷了 63896 行日志。现在：进程内第一次 WARNING，
+            #    之后每小时最多 INFO 一条。
+            now = time.monotonic()
+            if not backlog_warned:
+                backlog_warned = True
+                last_backlog_warn = now
+                logger.warning(
+                    "未确认更新已压到一页上限 %d 条（共用 bot 收到大量频道贴，属预期）；"
+                    "不推进 offset 也不设 allowed_updates ⇒ 页面被占满属正常，"
+                    "只要队列不超过 limit，本项目自己的消息仍能被取到。",
+                    len(updates),
+                )
+            elif now - last_backlog_warn >= _BACKLOG_WARN_INTERVAL:
+                last_backlog_warn = now
+                logger.info("未确认更新仍压在一页上限（%d 条）", len(updates))
 
         fresh = [u for u in updates if u.get("update_id") not in seen_set]
         if not fresh:

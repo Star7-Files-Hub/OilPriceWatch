@@ -12,10 +12,11 @@ from app import bot
 class _FakeDB:
     """替身 DB：只记订阅状态和 settings，绝不开 sqlite 文件。"""
 
-    def __init__(self, settings=None):
+    def __init__(self, settings=None, snapshot=None):
         self.subs = {}
         self.settings = dict(settings or {})
         self.removed = []
+        self.snapshot = snapshot
 
     def add_subscriber(self, chat_id, province_slug=None):
         # 与真 db 对齐：None 表示「保留原值」，不是清空。
@@ -33,6 +34,12 @@ class _FakeDB:
 
     def set_setting(self, key, value):
         self.settings[key] = value
+
+    def latest(self):
+        return self.snapshot
+
+    def subscriber_count(self):
+        return len(self.subs)
 
 
 class TestFindProvince(unittest.TestCase):
@@ -413,6 +420,258 @@ class TestWebhookGuard(unittest.TestCase):
         os.environ["OILWATCH_TG_ALLOW_WEBHOOK"] = "1"
         self.assertIsNotNone(bot.set_webhook())
         self.assertEqual(self.calls[0][1], "setWebhook")
+
+
+class _PushHarness(unittest.TestCase):
+    """推送类用例的公共脚手架：打桩 db / broadcast / token，记录发出去的文案。"""
+
+    SNAP = {
+        "generated_at": "2026-10-02T21:39:28",
+        "window": {"next_date": "2026-10-15", "workdays_remaining": 7},
+        "forecast": {
+            "self": {
+                "direction": "下调",
+                "yuan_per_ton": -168.9,
+                "yuan_per_liter": {"92": -0.125},
+            },
+            "site": {"direction": "下调", "yuan_per_ton": 150.0},
+        },
+    }
+
+    def setUp(self):
+        self._saved = (bot.db, bot.broadcast, bot.get_token)
+        self.db = _FakeDB()
+        bot.db = self.db
+        bot.get_token = lambda: "8914978774:fake"
+        self.sent = []
+        self.recipients = 1  # 让用例能模拟「一个订阅者都没有」
+
+        def fake_broadcast(text, snapshot=None):
+            self.sent.append(text)
+            return self.recipients
+
+        bot.broadcast = fake_broadcast
+
+    def tearDown(self):
+        bot.db, bot.broadcast, bot.get_token = self._saved
+
+    @staticmethod
+    def at(hour, day=3):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+
+        return datetime(2026, 10, day, hour, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+
+class TestDailyPush(_PushHarness):
+    """每日油价走向：每天最多成功一次，且**送出去才落幂等键**。"""
+
+    def test_before_hour_is_silent(self):
+        r = bot.maybe_daily_push(self.SNAP, now=self.at(7))
+        self.assertEqual(r["reason"], "before_hour")
+        self.assertEqual(self.sent, [])
+
+    def test_sends_once_per_day(self):
+        r = bot.maybe_daily_push(self.SNAP, now=self.at(8))
+        self.assertEqual(r["reason"], "daily")
+        self.assertEqual(len(self.sent), 1)
+        r2 = bot.maybe_daily_push(self.SNAP, now=self.at(9))
+        self.assertEqual(r2["reason"], "already_sent_today")
+        self.assertEqual(len(self.sent), 1, "同一天重复推送")
+
+    def test_sends_again_next_day(self):
+        bot.maybe_daily_push(self.SNAP, now=self.at(8, day=3))
+        r = bot.maybe_daily_push(self.SNAP, now=self.at(8, day=4))
+        self.assertEqual(r["reason"], "daily")
+        self.assertEqual(len(self.sent), 2)
+
+    def test_catch_up_late_in_day(self):
+        """服务 8 点没起来、22 点才起 ⇒ 当天照样补推，不静默度过一天。"""
+        r = bot.maybe_daily_push(self.SNAP, now=self.at(22))
+        self.assertEqual(r["reason"], "daily")
+
+    def test_no_recipient_keeps_key_unset_and_retries(self):
+        """回归线上 9/28：推送那一刻没有订阅者时，不能把这一天的机会用掉。"""
+        self.recipients = 0
+        r = bot.maybe_daily_push(self.SNAP, now=self.at(8))
+        self.assertEqual(r["reason"], "no_recipient")
+        self.assertNotIn(bot._DAILY_KEY, self.db.settings, "没人收到却落了幂等键")
+
+        # 用户后来订阅了 ⇒ 同一天仍能补推
+        self.recipients = 1
+        r2 = bot.maybe_daily_push(self.SNAP, now=self.at(9))
+        self.assertEqual(r2["reason"], "daily")
+
+    def test_title_is_daily_wording(self):
+        bot.maybe_daily_push(self.SNAP, now=self.at(8))
+        self.assertIn("今日油价走向", self.sent[0])
+
+    def test_no_window_is_silent(self):
+        r = bot.maybe_daily_push({"forecast": {}}, now=self.at(8))
+        self.assertEqual(r["reason"], "no_window")
+        self.assertEqual(self.sent, [])
+
+
+class TestCyclePushKey(_PushHarness):
+    """周期推送的幂等键同样必须「送达后才落」。"""
+
+    def test_no_change_after_delivery(self):
+        self.assertEqual(bot.maybe_push(self.SNAP)["reason"], "new_cycle")
+        self.assertEqual(self.db.settings["tg_last_cycle_next"], "2026-10-15")
+        self.assertEqual(bot.maybe_push(self.SNAP)["reason"], "no_change")
+
+    def test_regression_2026_09_28_nobody_subscribed_yet(self):
+        """线上事故回归：21:43 推送时**还没有订阅者**，不能就此把整轮静默掉。
+
+        旧写法先落键再发送 ⇒ 用户 22:16 订阅后要干等到下一轮（17 天）。
+        """
+        self.recipients = 0
+        r = bot.maybe_push(self.SNAP)
+        self.assertEqual(r["reason"], "no_recipient")
+        self.assertIsNone(
+            self.db.settings.get("tg_last_cycle_next"), "没人收到却落了幂等键"
+        )
+
+        # 用户订阅了 ⇒ 下一轮巡检必须把这一轮的播报补上
+        self.recipients = 1
+        r2 = bot.maybe_push(self.SNAP)
+        self.assertEqual(r2["reason"], "new_cycle")
+        self.assertEqual(len(self.sent), 2)  # 第一次也调了 broadcast（只是没人收）
+
+
+class TestDailyHourConfig(unittest.TestCase):
+    def setUp(self):
+        self._saved = os.environ.get("OILWATCH_TG_DAILY_HOUR")
+        os.environ.pop("OILWATCH_TG_DAILY_HOUR", None)
+
+    def tearDown(self):
+        if self._saved is None:
+            os.environ.pop("OILWATCH_TG_DAILY_HOUR", None)
+        else:
+            os.environ["OILWATCH_TG_DAILY_HOUR"] = self._saved
+
+    def test_default(self):
+        self.assertEqual(bot.daily_hour(), 8)
+
+    def test_override(self):
+        os.environ["OILWATCH_TG_DAILY_HOUR"] = "7"
+        self.assertEqual(bot.daily_hour(), 7)
+
+    def test_invalid_falls_back(self):
+        for bad in ("abc", "99", "-1", ""):
+            os.environ["OILWATCH_TG_DAILY_HOUR"] = bad
+            with self.subTest(bad=bad):
+                self.assertEqual(bot.daily_hour(), 8)
+
+
+class TestTodayCommand(unittest.TestCase):
+    """``/oil_today`` 手动查今日走向（也是推送出问题时的自检入口）。"""
+
+    def setUp(self):
+        self._saved = bot.db
+        self.db = _FakeDB(snapshot=_PushHarness.SNAP)
+        bot.db = self.db
+
+    def tearDown(self):
+        bot.db = self._saved
+
+    def test_returns_digest(self):
+        reply = bot.handle_text(1, "/oil_today")
+        self.assertIn("今日油价走向", reply)
+        self.assertIn("下调", reply)
+        self.assertIn("2026-10-15", reply)
+
+    def test_no_data_is_graceful(self):
+        self.db.snapshot = None
+        self.assertIn("还没准备好", bot.handle_text(1, "/oil_today"))
+
+    def test_still_silent_for_foreign_commands(self):
+        self.assertIsNone(bot.handle_text(1, "/status"))
+
+
+class TestPollingGlobalState(unittest.TestCase):
+    """共用 bot 的全局状态黑名单：**offset 和 allowed_updates 都不能碰**。
+
+    回归 2026-10-02：曾用 ``allowed_updates`` 过滤频道贴，线上实测发现它**不是**
+    按次生效，而是被 Telegram 写成**按 token 全局且持久**的订阅设置 ——
+    ``getWebhookInfo`` 的 ``allowed_updates`` 字段会跟着变，而且之后**不传该参数并不会恢复**
+    （传 ["callback_query"] ⇒ 全局变 ["callback_query"]；再不带参数调用，全局仍是它）。
+    那会静默掐掉其它项目/将来新增场景的更新类型，与「绝不碰全局状态」的红线冲突。
+    """
+
+    def setUp(self):
+        self._saved = (bot.db, bot._post, bot.dispatch_update, bot.time.sleep)
+        self.payloads = []
+
+    def tearDown(self):
+        bot.db, bot._post, bot.dispatch_update, bot.time.sleep = self._saved
+
+    def _run(self, batches):
+        bot.db = _FakeDB(snapshot=_PushHarness.SNAP)
+        self.handled = []
+        bot.dispatch_update = lambda u: self.handled.append(u)
+        it = iter(batches)
+        rounds = {"n": 0}
+
+        def fake_post(token, method, payload, *a, **kw):
+            self.payloads.append(dict(payload))
+            return {"ok": True, "result": next(it, [])}
+
+        stop = threading.Event()
+
+        def fake_sleep(_s):
+            rounds["n"] += 1
+            if rounds["n"] >= len(batches):
+                stop.set()
+
+        bot._post = fake_post
+        bot.time.sleep = fake_sleep
+        bot._poll_loop("tok", stop)
+
+    def test_never_sends_offset(self):
+        self._run([[]] * 2)
+        self.assertTrue(self.payloads)
+        for p in self.payloads:
+            self.assertNotIn("offset", p, "offset 是全局确认水位，会把别人的更新确认掉")
+
+    def test_never_sends_allowed_updates(self):
+        self._run([[]] * 2)
+        self.assertTrue(self.payloads)
+        for p in self.payloads:
+            self.assertNotIn(
+                "allowed_updates",
+                p,
+                "allowed_updates 是全局持久设置，会静默掐掉别的项目的更新类型",
+            )
+
+    def test_foreign_page_full_of_channel_posts_still_finds_our_message(self):
+        """一整页 100 条别人的频道贴 + 末尾我们的一条命令 ⇒ 必须照样交到分发层。
+
+        （过滤别人的更新是 :func:`dispatch_update` 的职责，见 TestDispatchSilence；
+        轮询这层的职责是**别把页面里的东西漏掉**。）
+        """
+        page = [{"update_id": i, "channel_post": {"message_id": i}} for i in range(1, 100)]
+        page.append(
+            {
+                "update_id": 100,
+                "message": {
+                    "chat": {"id": 5608153118},
+                    "text": "/oil_start 浙江",
+                },
+            }
+        )
+        self._run([page, []])
+        got = [u["update_id"] for u in self.handled]
+        self.assertIn(100, got, "自己的命令被满页频道贴挡掉了")
+        self.assertEqual(got, list(range(1, 101)), "有更新没被交给分发层（去重误杀）")
+
+    def test_backlog_warning_is_throttled_not_spammed(self):
+        """回归：这行告警曾经每轮都打，4 天刷了 63896 行日志。"""
+        page = [{"update_id": i, "channel_post": {"message_id": i}} for i in range(100)]
+        with self.assertLogs("oilwatch.bot", level="WARNING") as cm:
+            self._run([page] * 5)
+        warned = [r for r in cm.records if "压到一页上限" in r.getMessage()]
+        self.assertEqual(len(warned), 1, f"积压告警没有限流，打了 {len(warned)} 次")
 
 
 if __name__ == "__main__":

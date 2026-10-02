@@ -39,7 +39,7 @@
 ## 功能
 
 - **H5**：31 省油价一览、调价倒计时进度条、自动定位所在省、PWA 可添加到主屏幕离线查看
-- **Telegram Bot**：`/oil_start [省份]` 订阅；新一轮调价窗口开启时推送，附带你所在省的实时油价
+- **Telegram Bot**：`/oil_start [省份]` 订阅；**每天 8:00 推一次当日油价走向**，新一轮调价窗口开启时另有一次提醒，都附带你所在省的实时油价
 - **定时刷新**：每 30 分钟打一次上游并落 SQLite 缓存；访客只读缓存，不会穿透到上游
 - **CLI**：一条命令输出全国油价 + 预测，支持 `--json`
 - **自动定位**：浏览器定位（HTTPS 下）优先，坐标**在本机**换算成省份；退回 IP 推断
@@ -55,7 +55,8 @@
 
    | 命令 | 作用 |
    |---|---|
-   | `/oil_start` / `/oil_start 浙江` | 订阅（可同时指定省份） |
+   | `/oil_today` | 现在往哪走（今日走向，随时可查） |
+   | `/oil_start` / `/oil_start 浙江` | 订阅每日走向（可同时指定省份） |
    | `/oil_province 浙江` | 改省份 |
    | `/oil_stop` | 退订 |
    | `/oil_help`（或 `/oil`） | 说明 |
@@ -68,9 +69,33 @@
    - 轮询**永远不传 `offset`**：offset 是全局确认水位，传了就会把别的项目该收到的
      更新一并确认掉。代价是 Telegram 会反复返回同一批未确认更新，本项目在本地按
      `update_id` 去重（落 `settings`，重启不重复回复）并在没有新消息时退避。
+   - 🔴 **`allowed_updates` 也绝不能传**(2026-10-02 实测踩到)。它看起来只是
+     「本次只收某几类更新」,但 Telegram 会把它写成**按 token 全局且持久**的订阅设置:
+     `getWebhookInfo` 的 `allowed_updates` 字段会跟着变,而且**之后不传该参数并不会恢复**
+     (传 `["callback_query"]` ⇒ 全局变成 `["callback_query"]`;再不带参数调用,全局仍是它)。
+     那会静默掐掉别的项目/将来新增场景的更新类型,且极难排查。
+   - 这个 bot 同时是 tg-assistant 通知频道 `Notify` 的成员,频道每发一条就产生一条
+     `channel_post`,会把 `getUpdates` 的一页(上限 100 条)占满 —— 这是**预期噪音,
+     不能靠全局过滤去消除**。线上采样确认未确认队列长度稳定在 ~99-100 且不超过
+     `limit`,`limit=100` 的一页能覆盖整个队列,所以本项目自己的消息不会被挡在后面。
+     这个积压提示**只在进程内第一次打 WARNING、之后每小时最多一条 INFO**
+     (曾经每轮都打,4 天刷了 63896 行日志)。
    - `set_webhook()` / `delete_webhook()` **默认拒绝执行**（会掐断别人的 getUpdates），
      需显式设 `OILWATCH_TG_ALLOW_WEBHOOK=1` 才放行。
    - `sendMessage` 这类发送接口不动全局状态，正常使用。
+
+## 📣 推送有两条，都靠「送达后才落幂等键」
+
+| 推送 | 时机 | 幂等键 |
+|---|---|---|
+| 每日油价走向 | 每天 `OILWATCH_TG_DAILY_HOUR`（默认 8 点）之后一次 | `settings.tg_last_daily_date` |
+| 新一轮调价窗口开启 | `window.next_date` 变化时一次 | `settings.tg_last_cycle_next` |
+
+🔴 **幂等键只在真的送出去之后才落**（`sent > 0`）。反过来写（先落键再发送）会踩到一个
+真实事故：2026-09-28 21:43 那次周期推送时**还没有任何订阅者**，键却被写下了，
+用户 22:16 才订阅，于是接下来 17 天一条推送都收不到。
+现在没送出去就不落键 ⇒ 每 30 分钟的巡检会**自动补推**，既不会静默度过一轮/一天，
+也不会重复发。服务重启、错过 8 点同样会自动补上当天的走向。
 
 ## 快速开始
 
@@ -101,6 +126,7 @@ Bot 会静默跳过，管理接口在未设 token 时放行（仅适合本地调
 | `OILWATCH_TG_WEBHOOK_URL` | 配了就走 Webhook（需公网 HTTPS），否则走 Polling |
 | `OILWATCH_TG_WEBHOOK_SECRET` | Webhook 校验密钥，可选但推荐 |
 | `OILWATCH_TG_ALLOW_WEBHOOK` | 共用 bot 上**默认不设**：设成 `1` 才允许 `setWebhook`/`deleteWebhook`（会掐断别的项目） |
+| `OILWATCH_TG_DAILY_HOUR` | 每日油价走向的推送时间（小时，Asia/Shanghai），默认 `8`。改完重启生效 |
 | `OILWATCH_TG_POLL_IDLE_SLEEP` | 轮询没有新消息时的退避秒数，默认 `2.0`。共用 bot 上别调太小（不推进 offset ⇒ 老更新会被反复取回） |
 | `OILWATCH_ADMIN_TOKEN` | 保护 `/api/refresh` 与改锚点接口 |
 | `OILWATCH_LOG_LEVEL` | 日志级别，默认 `INFO` |
@@ -160,7 +186,7 @@ deploy/            systemd / nginx / .env 示例
 ## 测试
 
 ```bash
-pytest tests/ -q      # 92 passed
+pytest tests/ -q      # 112 passed
 ```
 
 覆盖调价窗口推算与节假日、预测文案解析与方向归一化、省份判定（41 个城市用例，
