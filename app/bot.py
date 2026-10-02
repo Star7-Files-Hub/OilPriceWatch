@@ -260,29 +260,81 @@ _CONFIRM_NO = frozenset(
     }
 )
 #: 语气尾巴：剥掉后再匹配（「好呀」「订阅吧」「不要了」都能对上）。
-_CONFIRM_TAILS = ("呀", "吧", "啊", "哦", "嘛", "呢", "啦", "了")
+#: 复核 F3 指出只剥**一个**尾巴不够：「不要了吧」「别了吧」「不订阅了」会落空 ⇒
+#: 用户**明确拒绝**却不生效、待办继续挂着，日后一句「嗯」反而把他订阅了。
+#: 所以改成**循环剥**（有上限），并补「嘞」这类口语尾。
+_CONFIRM_TAILS = ("呀", "吧", "啊", "哦", "嘛", "呢", "啦", "了", "嘞")
+#: 尾部叠词：``嗯嗯``/``行行``/``好好``/``okok`` 这类也当同一个词。
 #: 尾部标点：``OK!`` / ``是。`` 也算。
 _CONFIRM_PUNCT = "！!。.～~,，、;；:： \t"
+#: 否认前缀：以这些开头且足够短 ⇒ 认定为否认（``不订阅了`` / ``别搞了``…）。
+#: ⚠️ 只对否认做前缀匹配。**确认绝不能做前缀匹配** —— 那会把「是的我在北京」这类
+#:    闲聊也算成确认，正是要避免的抢答。
+_NO_PREFIXES = ("不", "别", "取消", "算了", "否")
 
 
 def _normalize_confirmation(text: str) -> str:
-    """把一句可能的确认词规整成可比对的形式（大小写/空白/标点不敏感）。"""
+    """规整成可比对的形式（大小写/空白/标点不敏感）。"""
     return (text or "").strip().lower().strip(_CONFIRM_PUNCT)
+
+
+def _strip_tails(t: str) -> list[str]:
+    """把语气尾巴**循环**剥掉，返回依次变短的候选（含原串）。
+
+    复核 F3：「不要了吧」只剥一次得到「不要了」仍不在表里 ⇒ 落空。循环剥到「不要」才命中。
+    上限 3 次，避免病态输入把循环拖长。
+    """
+    out = [t]
+    cur = t
+    for _ in range(3):
+        for tail in _CONFIRM_TAILS:
+            if len(cur) > len(tail) and cur.endswith(tail):
+                cur = cur[: -len(tail)]
+                out.append(cur)
+                break
+        else:
+            break
+    return out
+
+
+def _dedup_repeats(t: str) -> str | None:
+    """``嗯嗯``→``嗯``、``行行``→``行``、``okok``→``ok``、``好的好的``→``好的``。
+
+    只在「正好是两个相同半段」时才减半，所以不会碰「行不行」「是不是」。
+    """
+    if len(t) < 2:
+        return None
+    half = len(t) // 2
+    if half and t[:half] * 2 == t:
+        return t[:half]
+    return None
 
 
 def confirmation_kind(text: str) -> int:
     """``1`` = 确认，``-1`` = 否认，``0`` = 都不是。
 
-    ⚠️ 顺序很重要：**先原样比**，再比「剥掉语气尾巴」的形式。
-       否则「算了」会被剥成「算」而失配（虽然它在否认表里）——
-       这正是第一版测试抓到的回归。
+    判定顺序（每一层都必要，改动前先看测试）：
+    1. 原串与**循环剥尾巴**后的候选逐个精确比对；
+    2. 否认前缀（只对否认，且要求够短）：``不订阅了`` / ``别搞了`` 这类要能生效 ——
+       用户明确拒绝后待办若继续挂着，日后一句无关的「嗯」会把他订阅了（复核 F3）；
+    3. 叠词去重（可反复）：``嗯嗯`` / ``好好`` / ``okok`` / ``好的好的`` 是常见的确认写法，
+       不能变成死路。
     """
     t = _normalize_confirmation(text)
-    candidates = [t]
-    for tail in _CONFIRM_TAILS:
-        if len(t) > len(tail) and t.endswith(tail):
-            candidates.append(t[: -len(tail)])
+    if not t:
+        return 0
+    candidates = _strip_tails(t)
+    # 否认前缀：够短才认（避免把长句闲聊当否认）。YES 表里没有任何词以这些开头，
+    # 所以命中前缀即可直接判否认。
+    if len(t) <= 6 and t.startswith(_NO_PREFIXES):
+        return -1
+    dedup = t
+    for _ in range(3):
+        nxt = _dedup_repeats(dedup)
+        if not nxt or nxt == dedup:
             break
+        dedup = nxt
+        candidates += _strip_tails(dedup)
     for c in candidates:
         if c in _CONFIRM_YES:
             return 1
@@ -410,17 +462,16 @@ def handle_text(chat_id, text: str, chat_type: str = "group") -> str | None:
         )
 
     if action == "start":
+        # 🔴 先清待办再判省份：复核 F5 —— 用户敲了显式命令（哪怕省份打错）就说明
+        #    他有新的意图，旧 pending 不能继续挂着等一句「嗯」把它兑现成**旧省份**。
+        db.clear_pending_subscription(str(chat_id))
         if arg:
             p = _find_province(arg)
             if not p:
                 return "没认出这个省份，试试「浙江」「广东」这样的全称。"
             db.add_subscriber(str(chat_id), p.slug)
-            db.clear_pending_subscription(str(chat_id))
             return _subscribed_reply(p)
         db.add_subscriber(str(chat_id))
-        # 显式订阅命令也清待办：否则日后一句「是」会**悄悄改写刚设好的省份**并再回一次
-        # 「已订阅」（独立复核的 P4：无参形式漏了这一步）。
-        db.clear_pending_subscription(str(chat_id))
         return (
             f"已订阅 ⛽\n\n"
             f"· 每天 {daily_hour()}:00 推当日油价走向\n"
@@ -432,11 +483,12 @@ def handle_text(chat_id, text: str, chat_type: str = "group") -> str | None:
         )
 
     # action == "province"（显式 /oil_province 浙江：用户敲了明确命令 ⇒ 直接生效）
+    # 同样先清待办（复核 F5：``/oil_province 火星`` 打错省份也要清，否则旧 pending 继续武装）。
+    db.clear_pending_subscription(str(chat_id))
     p = _find_province(arg)
     if not p:
         return "没认出这个省份，试试「浙江」「广东」这样的全称。"
     db.add_subscriber(str(chat_id), p.slug)
-    db.clear_pending_subscription(str(chat_id))
     return f"已把你所在的省份设为 {p.name} ✅\n调价提醒将按 {p.name} 的油价播报。"
 
 

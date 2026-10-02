@@ -28,23 +28,37 @@ from .limit import RateLimitMiddleware
 logger = logging.getLogger("oilwatch.api")
 
 STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
-ADMIN_TOKEN = os.environ.get("OILWATCH_ADMIN_TOKEN")  # 不设则关闭保护（仅本地开发）
+#: 写接口的管理密钥。**不设 = 拒绝**（fail-closed），不是「不设 = 放行」。
+#: 2026-10-03 复核：原实现是 ``if ADMIN_TOKEN and ...``，空值短路即放行 ⇒ 出厂 example
+#: 里该值就是空的，于是「忘配 token」的部署 = 公网匿名可改调价锚点、可反复触发上游抓取。
+#: 本地调试要放行请显式设 ``OILWATCH_DEV=1``（见 :data:`DEV_OPEN`）。
+ADMIN_TOKEN = os.environ.get("OILWATCH_ADMIN_TOKEN")
+#: 逃生门：只给本地调试用。必须显式打开，绝不作为默认值。
+DEV_OPEN = os.environ.get("OILWATCH_DEV") == "1"
 
 # 冷启动：无缓存、或缓存整体不可用（覆盖 0）时，先抓一次把数据垫上。
 # 覆盖 0 也要重抓，是因为上一次抓取可能因上游问题（如证书/限流）整批失败，
 # 若只判 `is None` 会把这份坏快照一直服务到下次定时刷新。
 def _warn_insecure_config() -> None:
-    """把「不安全但被允许」的配置在启动时喊出来。
+    """把「不安全 / 收不到消息」的配置在启动时喊出来。
 
-    ``OILWATCH_ADMIN_TOKEN`` 为空是 **fail-open**（写接口对所有人放行），保留它是为了
-    本地调试方便。但 fail-open 的默认值必须显眼：2026-10-03 复核发现同一个坑的另一半
-    —— ``/webhook/tg`` 的 ``if secret and ...`` 在 secret 为空时短路，结果公网可写。
-    所以这里不阻止启动，但每次都打 WARNING，让 ``journalctl`` 里躲不掉。
+    两条都是「代码允许但部署多半搞错了」的组合：
+    1. ``OILWATCH_ADMIN_TOKEN`` 未设 —— 写接口现在会 fail-closed（403），但本地调试
+       之外没人该在这个状态下跑，所以仍要骂一句（别让 403 变成莫名其妙的现象）。
+    2. 配了 ``OILWATCH_TG_WEBHOOK_URL`` 却没配 SECRET —— 路由会被注册，但一律 403；
+       同时因为有 URL 就不再轮询 ⇒ **这个 bot 彻底聋了**。方向是「宁可聋不可裸」，
+       但必须让人一眼看出来，而不是等用户报「机器人不回我」。
     """
-    if not ADMIN_TOKEN:
+    if not ADMIN_TOKEN and not DEV_OPEN:
         logger.warning(
-            "未设置 OILWATCH_ADMIN_TOKEN ⇒ /api/refresh 与 /api/settings/anchor "
-            "对所有人放行（这是 fail-open，不是「可选」）；公网部署必须设。"
+            "未设置 OILWATCH_ADMIN_TOKEN ⇒ /api/refresh 与 /api/settings/anchor 一律 403"
+            "（fail-closed）。本地调试请显式设 OILWATCH_DEV=1。"
+        )
+    if bot.get_webhook_url() and not bot.get_webhook_secret():
+        logger.error(
+            "配了 OILWATCH_TG_WEBHOOK_URL 但没配 OILWATCH_TG_WEBHOOK_SECRET ⇒ "
+            "/webhook/tg 一律 403，且不会回退到轮询 ⇒ **完全收不到更新**。"
+            "请补 secret，或清空 WEBHOOK_URL 走轮询。"
         )
 
 
@@ -76,7 +90,19 @@ app.add_middleware(RateLimitMiddleware)
 
 
 def _require_admin(x_admin_token: str | None) -> None:
-    if ADMIN_TOKEN and x_admin_token != ADMIN_TOKEN:
+    """写接口的鉴权。**fail-closed**：没配 token 就一律 403，而不是放行。
+
+    - ``OILWATCH_DEV=1``：本地调试逃生门，显式打开才放行；
+    - token 未配置：403（并让启动日志骂一句，见 :func:`_warn_insecure_config`）；
+    - token 不匹配：403，用 ``hmac.compare_digest`` 定长比较（与 webhook 一致）。
+    """
+    if DEV_OPEN:
+        return
+    if not ADMIN_TOKEN:
+        raise HTTPException(status_code=403, detail="admin token not configured")
+    if not x_admin_token or not hmac.compare_digest(
+        x_admin_token.encode(), ADMIN_TOKEN.encode()
+    ):
         raise HTTPException(status_code=403, detail="forbidden")
 
 

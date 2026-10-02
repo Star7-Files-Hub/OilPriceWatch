@@ -195,10 +195,14 @@ def set_pending_subscription(chat_id: str, province_slug: str) -> None:
 
 
 def _pending_expired(created_at: str | None, max_age_seconds: int) -> bool:
-    """``created_at``（SQLite ``datetime('now')`` = UTC）是否已超出有效期。
+    """``created_at``（SQLite ``datetime('now')`` = UTC）是否已不可信/已过期。
 
-    取不到/解析不了时间戳时按**已过期**处理（宁可让用户重新确认一次，
-    也不要让一条来源不明的待办在几个月后突然兑现）。
+    三种情况都算「过期」：
+    - 取不到或解析不了时间戳（宁可让用户重新确认一次）；
+    - 比现在**早**超过 ``max_age_seconds``；
+    - 比现在**晚**超过 60 秒 —— 独立复核 F2：原来只判 ``(now - made) > max_age``，
+      于是**未来**时间戳差值为负、永远不大于 TTL ⇒ 永不判过期。时钟回拨
+      （NTP 校正 / 虚机快照回滚）或有人写库都能造出这种「长生待办」。
     """
     if not created_at:
         return True
@@ -208,7 +212,8 @@ def _pending_expired(created_at: str | None, max_age_seconds: int) -> bool:
         )
     except ValueError:
         return True
-    return (datetime.now(timezone.utc) - made).total_seconds() > max_age_seconds
+    delta = (datetime.now(timezone.utc) - made).total_seconds()
+    return delta > max_age_seconds or delta < -60
 
 
 def get_pending_subscription(

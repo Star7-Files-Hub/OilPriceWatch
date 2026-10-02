@@ -398,20 +398,51 @@ class TestSubscribeConfirmation(unittest.TestCase):
         self.assertIsNone(bot.handle_text(1, "是", "private"))
         self.assertIsNone(self.db.subs["1"], "残留待办被兑现，悄悄改了省份")
 
+    def test_failed_province_command_also_clears_pending(self):
+        """复核 F5：``/oil_province 火星`` 与「无参 /oil_start」是同一形状 ——
+
+        用户表达了新的显式意图（改省份）但没成功，旧待办却继续武装，
+        日后一句「嗯」会把他订阅成**旧 pending 的那个省**（跟他的新意图不一致）。
+        """
+        for cmd in ("/oil_province 火星", "/oil_start 火星"):
+            with self.subTest(cmd=cmd):
+                self.db.pending["1"] = "guangdong"
+                reply = bot.handle_text(1, cmd, "private")
+                self.assertIn("没认出", reply)
+                self.assertEqual(self.db.pending, {}, f"{cmd} 打错省份后旧待办还挂着")
+
     def test_confirmation_variants_are_recognized(self):
         """复核 P7：'好' 认而 '好呀' 不认是不对称的，用户以为回了其实被静默。"""
         for w in (
-            "是", "是的", "好", "好的", "好呀", "好的呢", "嗯", "行", "可以", "对",
-            "要", "要的", "确认", "订阅", "订阅吧", "OK", "ok!", "YES", "y", "是。", " 是 ",
+            "是", "是的", "好", "好的", "好呀", "好的呢", "嗯", "嗯嗯", "行", "行行",
+            "可以", "对", "要", "要的", "确认", "订阅", "订阅吧", "OK", "ok!", "YES",
+            "y", "是。", " 是 ", "好嘞", "好的好的",
+            # 需要**连续剥两次**语气尾巴才算确认：钉住 _strip_tails 的循环（复核 F3）
+            "好的吧呢",
         ):
             with self.subTest(word=w):
                 self.assertTrue(bot.is_confirmation(w), f"{w!r} 应该算确认")
-        for w in ("否", "不", "不是", "不用", "不要", "不要了", "不行", "取消", "算了", "no"):
+        for w in ("否", "不", "不是", "不用", "不要", "不要了", "不行", "取消", "算了",
+                  "no", "不要了吧", "别了吧", "不订阅了", "算了算了", "取消吧"):
             with self.subTest(word=w):
                 self.assertTrue(bot.is_confirmation(w), f"{w!r} 应该算否认")
 
+    def test_explicit_refusal_actually_cancels(self):
+        """🔴 复核 F3：用户**明确拒绝**却落空 ⇒ 待办继续武装，日后一句「嗯」就订阅了。
+
+        这是「沉默」比「错判」更危险的少数场景，必须有测试钉住。
+        """
+        for word in ("不要了吧", "别了吧", "不订阅了", "算了算了", "不用了吧"):
+            with self.subTest(word=word):
+                self.db.pending["1"] = "zhejiang"
+                reply = bot.handle_text(1, word, "private")
+                self.assertIsNotNone(reply, f"{word!r} 被静默了，用户以为拒绝了")
+                self.assertIn("取消", reply)
+                self.assertEqual(self.db.pending, {}, f"{word!r} 之后待办还挂着")
+                self.assertEqual(self.db.subs, {})
+
     def test_chitchat_is_never_a_confirmation(self):
-        for w in ("是的我在北京", "你好", "是不是", "好的好的", "没事", "", "   ", "行不行"):
+        for w in ("是的我在北京", "你好", "是不是", "没事", "", "   ", "行不行", "订阅了吗"):
             with self.subTest(word=w):
                 self.assertFalse(bot.is_confirmation(w), f"{w!r} 不该算确认")
 

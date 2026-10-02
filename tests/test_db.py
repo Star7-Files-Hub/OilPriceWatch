@@ -6,6 +6,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 from app import db
@@ -198,6 +199,84 @@ class TestPendingSubscription(unittest.TestCase):
         db.set_pending_subscription("1", "zhejiang")
         self._age_pending("1", "not-a-timestamp")
         self.assertIsNone(db.get_pending_subscription("1"))
+
+    def test_future_timestamp_is_treated_as_expired(self):
+        """🔴 复核 F2：``(now - made) > ttl`` 对**未来**时间戳恒为假 ⇒ 永不判过期。
+
+        时钟回拨（NTP 校正 / 虚机快照回滚）或有人写库都能造出这种「长生待办」。
+        方向必须和「缺失/畸形」一致：都按不可信处理。
+        """
+        db.set_pending_subscription("1", "zhejiang")
+        self._age_pending("1", "2099-01-01 00:00:00")
+        self.assertIsNone(db.get_pending_subscription("1"), "未来时间戳的待办长生不老")
+        with db._session() as conn:
+            left = conn.execute(
+                "SELECT COUNT(*) FROM pending_subscriptions WHERE chat_id = ?", ("1",)
+            ).fetchone()[0]
+        self.assertEqual(left, 0)
+
+    def test_slightly_future_timestamp_is_tolerated(self):
+        """只容忍小幅超前（几秒的时钟漂移），不能把正常写入误判成过期。"""
+        db.set_pending_subscription("1", "zhejiang")
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        self._age_pending("1", stamp)
+        self.assertEqual(db.get_pending_subscription("1"), "zhejiang")
+
+
+class TestPendingTtlWiring(unittest.TestCase):
+    """🔴 复核 F7：db 层的 TTL 有覆盖，但**bot 层有没有真的用上**当时零覆盖。
+
+    注入 ``_handle_confirmation`` 传 ``max_age_seconds=10**9``（等于关掉 TTL）163 个测试
+    全绿 ⇒ 说明没人验过这条接线。这里用**真 sqlite**跑一遍完整确认链路。
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self._saved_path, self._saved_db = db.DB_PATH, None
+        db.DB_PATH = Path(self._tmp.name) / "t.db"
+        db.init()
+        from app import bot
+
+        self._bot = bot
+        self._saved_bot_db = bot.db
+        bot.db = db
+        self._saved_send = bot.send_message
+        bot.send_message = lambda *a, **k: None
+
+    def tearDown(self):
+        self._bot.db = self._saved_bot_db
+        self._bot.send_message = self._saved_send
+        db.DB_PATH = self._saved_path
+        self._tmp.cleanup()
+
+    def _age(self, chat_id: str, stamp: str) -> None:
+        with db._session(write=True) as conn:
+            conn.execute(
+                "UPDATE pending_subscriptions SET created_at = ? WHERE chat_id = ?",
+                (stamp, chat_id),
+            )
+
+    def _say(self, text: str, chat_id: int = 555, ctype: str = "private") -> list:
+        sent = []
+        self._bot.send_message = lambda cid, t, **k: sent.append((cid, t))
+        self._bot.dispatch_update(
+            {"update_id": 1, "message": {"chat": {"id": chat_id, "type": ctype}, "text": text}}
+        )
+        return sent
+
+    def test_expired_pending_cannot_subscribe_via_bot(self):
+        self._say("浙江")  # 走完整链路落一条待办
+        self.assertEqual(db.get_pending_subscription("555"), "zhejiang")
+        self._age("555", "2020-01-01 00:00:00")
+        self.assertEqual(self._say("是"), [], "过期待办被兑现成了订阅")
+        self.assertEqual(db.list_subscribers(), [])
+
+    def test_fresh_pending_still_subscribes_via_bot(self):
+        self._say("浙江")
+        sent = self._say("是")
+        self.assertEqual(len(sent), 1)
+        self.assertIn("已订阅", sent[0][1])
+        self.assertEqual(db.list_subscribers(), [{"chat_id": "555", "province_slug": "zhejiang"}])
 
 
 if __name__ == "__main__":
