@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import hmac
 import os
 from contextlib import asynccontextmanager
 from datetime import date
@@ -146,15 +147,32 @@ def locate(request: Request) -> dict:
     return {"ip": ip, "province": slug, "name": prov.name if prov else None}
 
 
-@app.post("/webhook/tg")
 async def tg_webhook(request: Request) -> dict:
-    """Telegram Webhook 入口（生产环境用，需公网 HTTPS）。
+    """Telegram Webhook 入口（**只在 webhook 模式下注册**，见文件末尾）。
 
-    校验 secret_token（配了 OILWATCH_TG_WEBHOOK_SECRET 才校验），解析更新后即时返回 200，
-    发送动作同步做（量小，几百 ms 无所谓）。
+    🔴 这个端点绝不能裸奔 —— 2026-10-03 独立复核发现并实测确认：部署机 8010 直接
+    对公网开放（从**外网** GET ``/openapi.json`` 得到 200），而请求体里的 ``chat.type``
+    **完全由调用方伪造**。无鉴权时任何第三方都能：
+
+    - 替**任意 chat_id** 订阅（写 ``subscribers``）；
+    - 替任意 chat_id 种下待办（写 ``pending_subscriptions``）⇒ 之后那个会话里
+      一句「是」就替受害者订阅成功；
+    - 伪造 ``type=private`` 绕过「纯省份名只认私聊」的约定。
+
+    所以双重收紧：
+    ① **轮询模式下根本不注册这个路由**（线上就是纯轮询 ⇒ 路由不存在，零攻击面）；
+    ② 真跑 webhook 时 ``OILWATCH_TG_WEBHOOK_SECRET`` 为空一律 403（fail closed）；
+       有值则用 ``hmac.compare_digest`` 定长比较，不给时序侧信道。
     """
     secret = bot.get_webhook_secret()
-    if secret and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+    if not secret:
+        # 不是「配错了」，而是**根本不该受理**：宁可 webhook 全废，也不能匿名可写。
+        logger.error(
+            "拒绝 /webhook/tg：未配置 OILWATCH_TG_WEBHOOK_SECRET（否则就是匿名可写的入口）"
+        )
+        raise HTTPException(status_code=403, detail="webhook secret not configured")
+    got = request.headers.get("X-Telegram-Bot-Api-Secret-Token") or ""
+    if not hmac.compare_digest(got, secret):
         raise HTTPException(status_code=403, detail="forbidden")
     try:
         data = await request.json()
@@ -165,6 +183,13 @@ async def tg_webhook(request: Request) -> dict:
     except Exception as exc:  # noqa: BLE001
         logger.warning("webhook 处理失败: %s", exc)
     return {"ok": True}
+
+
+# 🔴 只有真跑 webhook 模式才挂这个入口。轮询模式下它没有任何合法用途，挂上就等于白送
+#    一个「匿名可写订阅状态」的公网接口。复用 bot.get_webhook_url()，与「轮询/收更新
+#    二选一」的判断保持同一来源，避免两处配置漂移。
+if bot.get_webhook_url():
+    app.add_api_route("/webhook/tg", tg_webhook, methods=["POST"])
 
 
 @app.get("/api/bot/status")

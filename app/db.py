@@ -16,11 +16,15 @@ import json
 import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator
 
 DB_PATH = Path(__file__).resolve().parent.parent / "data" / "oilwatch.db"
 _lock = threading.Lock()
+
+#: 待确认订阅的有效期（秒）。问过一句之后隔太久才冒出来的「是」不该算数。
+PENDING_TTL_SECONDS = 24 * 3600
 
 
 def _conn() -> sqlite3.Connection:
@@ -190,13 +194,45 @@ def set_pending_subscription(chat_id: str, province_slug: str) -> None:
         )
 
 
-def get_pending_subscription(chat_id: str) -> str | None:
+def _pending_expired(created_at: str | None, max_age_seconds: int) -> bool:
+    """``created_at``（SQLite ``datetime('now')`` = UTC）是否已超出有效期。
+
+    取不到/解析不了时间戳时按**已过期**处理（宁可让用户重新确认一次，
+    也不要让一条来源不明的待办在几个月后突然兑现）。
+    """
+    if not created_at:
+        return True
+    try:
+        made = datetime.strptime(created_at, "%Y-%m-%d %H:%M:%S").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError:
+        return True
+    return (datetime.now(timezone.utc) - made).total_seconds() > max_age_seconds
+
+
+def get_pending_subscription(
+    chat_id: str, max_age_seconds: int = PENDING_TTL_SECONDS
+) -> str | None:
+    """取**未过期**的待确认省份；不存在或已过期返回 None（顺手删掉过期行）。
+
+    🔴 有效期不是可选项：独立复核（P2）证明 ``created_at`` 当时只写不读 ⇒ 待办
+    **永不过期**，「没有待办时一律沉默」实际退化成「没有**历史遗留**待办时」。
+    只要用户曾发过一次省份名，几个月后随口一句「好」都会把它兑现成订阅。
+    """
     with _session() as conn:
         row = conn.execute(
-            "SELECT province_slug FROM pending_subscriptions WHERE chat_id = ?",
+            "SELECT province_slug, created_at FROM pending_subscriptions "
+            "WHERE chat_id = ?",
             (str(chat_id),),
         ).fetchone()
-    return row[0] if row else None
+    if not row:
+        return None
+    slug, created_at = row
+    if _pending_expired(created_at, max_age_seconds):
+        clear_pending_subscription(chat_id)
+        return None
+    return slug
 
 
 def clear_pending_subscription(chat_id: str) -> None:

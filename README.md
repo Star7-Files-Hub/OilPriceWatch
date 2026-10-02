@@ -69,9 +69,19 @@
    - 纯省份名**只当意图**，落进 `pending_subscriptions` 表，不写 `subscribers`；
    - **群里一律不认**（`chat.type != private` 直接返回 `None`）。群里那句话很可能是
      别人的对话，接过去就是抢答；要订阅请用显式命令 `/oil_start 浙江`。
-   - 只有回「是」才真订阅（「否」取消）；**没有本项目待办时「是/否」一律沉默** ——
+   - 待办**有 24 小时有效期**（`db.PENDING_TTL_SECONDS`）：过期即视为不存在并顺手删行。
+     没有 TTL 时「没有待办就沉默」实际退化成「没有**历史遗留**待办就沉默」——
+     几个月后随口一句「好」都会把它兑现成订阅（独立复核 P2）。
+   - 确认路径**也**挡群聊（纵深防御）：写入端只给私聊留待办，但确认分支同样要求
+     `chat.type == private` —— 只靠写入端时，「群聊完全沉默」这个不变量一旦有群
+     存在待办行就会被打破（复核 P3）。
+   - 只有回「是」才真订阅（「否」取消）；**没有未过期待办时「是/否」一律沉默** ——
      别人的对话里出现「是」太常见，不能接话。确认词只认孤立短词，
      「是的我在北京」这种闲聊不算；`chat.type` 字段缺失时按**群聊**处理（最保守）。
+     词表覆盖「是/好/好呀/嗯/行/可以/OK!/订阅吧…」与「否/不要了/算了…」
+     （尾部的语气词与标点会被剥掉再比对，复核 P7 指出「好」认而「好呀」不认是不对称的）。
+     显式命令（含不带省份的 `/oil_start`）都会**清掉待办**，不留会被下一句「是」
+     误触发的残留（复核 P4）。
 
    别的项目的命令（`/status` `/start` `/help`…）与任意闲聊**一律不回应**，
    连日志都只打 debug。
@@ -110,6 +120,20 @@
    - `set_webhook()` / `delete_webhook()` **默认拒绝执行**（会掐断别人的 getUpdates），
      需显式设 `OILWATCH_TG_ALLOW_WEBHOOK=1` 才放行。
    - `sendMessage` 这类发送接口不动全局状态，正常使用。
+
+3. **`/webhook/tg` 绝不裸奔**（2026-10-03 独立复核发现，属**高危**）。
+   - 事实：部署机 8010 **直接对公网开放**（从外网 `GET /openapi.json` 得 200），
+     而请求体里的 `chat.type` 完全由调用方伪造。当时端点无鉴权
+     （`if secret and ...` 在 secret 为空时短路）⇒ 任何人都能替**任意 chat_id**
+     订阅、或种下一条待办（之后那个会话里一句「是」就替受害者订阅成功），
+     还能伪造 `type=private` 绕过「纯省份名只认私聊」。
+   - 现在双重收紧：① **轮询模式下根本不注册这个路由**（线上就是纯轮询 ⇒
+     路由不存在、`openapi.json` 里也看不到，零攻击面）；② 真跑 webhook 时
+     secret 为空一律 **403（fail closed）**，有值则 `hmac.compare_digest` 定长比较。
+     回归测试见 `tests/test_main.py`（此前 `app/main.py` **一个测试都没有**，
+     所以这个洞在 161 个测试全绿时活了下来）。
+   - 顺带核实：`OILWATCH_ADMIN_TOKEN` 线上**已设置**，不带 token 打
+     `/api/refresh`、`/api/settings/anchor` 均为 403。
 
 ## 📣 推送有两条，都靠「送达后才落幂等键」
 
@@ -161,12 +185,12 @@ Bot 会静默跳过，管理接口在未设 token 时放行（仅适合本地调
 |---|---|
 | `OILWATCH_TG_BOT_TOKEN` | Telegram Bot Token（@BotFather）。留空则 Bot 功能整体关闭 |
 | `OILWATCH_TG_WEBHOOK_URL` | 配了就走 Webhook（需公网 HTTPS），否则走 Polling |
-| `OILWATCH_TG_WEBHOOK_SECRET` | Webhook 校验密钥，可选但推荐 |
+| `OILWATCH_TG_WEBHOOK_SECRET` | Webhook 校验密钥。**不设就等于把这个 bot 的订阅状态开放给公网**（见下）⇒ 走 webhook 时必须设 |
 | `OILWATCH_TG_ALLOW_WEBHOOK` | 共用 bot 上**默认不设**：设成 `1` 才允许 `setWebhook`/`deleteWebhook`（会掐断别的项目） |
 | `OILWATCH_TG_DAILY_HOUR` | 每日油价走向的推送时间（小时，Asia/Shanghai），默认 `8`。改完重启生效 |
 | `OILWATCH_TG_ALLOW_OFFSET` | 设 `1` 才允许轮询推进 offset（清空积压、命令秒级可达）。**默认关闭**；打开前必须确认该 token 上没有别的项目用 Bot API getUpdates |
 | `OILWATCH_TG_POLL_IDLE_SLEEP` | 轮询没有新消息时的退避秒数，默认 `2.0`。共用 bot 上别调太小（不推进 offset ⇒ 老更新会被反复取回） |
-| `OILWATCH_ADMIN_TOKEN` | 保护 `/api/refresh` 与改锚点接口 |
+| `OILWATCH_ADMIN_TOKEN` | 保护 `/api/refresh` 与改锚点接口。**不设则放行**，公网部署必须设 |
 | `OILWATCH_LOG_LEVEL` | 日志级别，默认 `INFO` |
 | `OILWATCH_TLS_INSECURE` | **仅本机沙箱调试**用，部署到服务器后**不要设** |
 
@@ -224,7 +248,7 @@ deploy/            systemd / nginx / .env 示例
 ## 测试
 
 ```bash
-pytest tests/ -q      # 139 passed
+pytest tests/ -q      # 161 passed
 ```
 
 覆盖调价窗口推算与节假日、预测文案解析与方向归一化、省份判定（41 个城市用例，

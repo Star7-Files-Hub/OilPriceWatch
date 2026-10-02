@@ -162,6 +162,43 @@ class TestPendingSubscription(unittest.TestCase):
         self.assertEqual(db.list_subscribers(), [])
         self.assertEqual(db.subscriber_count(), 0)
 
+    def _age_pending(self, chat_id: str, stamp: str) -> None:
+        with db._session(write=True) as conn:
+            conn.execute(
+                "UPDATE pending_subscriptions SET created_at = ? WHERE chat_id = ?",
+                (stamp, chat_id),
+            )
+
+    def test_stale_pending_expires_and_is_deleted(self):
+        """🔴 复核 P2：``created_at`` 曾经只写不读 ⇒ 待办永不过期。
+
+        后果：用户几个月后随口一句「好」都会被兑现成订阅。现在超过 TTL 即
+        视为不存在，并顺手删掉过期行。
+        """
+        db.set_pending_subscription("1", "zhejiang")
+        self._age_pending("1", "2020-01-01 00:00:00")
+        self.assertIsNone(db.get_pending_subscription("1"), "过期待办仍被当成有效")
+        with db._session() as conn:
+            left = conn.execute(
+                "SELECT COUNT(*) FROM pending_subscriptions WHERE chat_id = ?", ("1",)
+            ).fetchone()[0]
+        self.assertEqual(left, 0, "过期行没有被清掉，表会越积越多")
+
+    def test_fresh_pending_survives(self):
+        db.set_pending_subscription("1", "zhejiang")
+        self.assertEqual(db.get_pending_subscription("1"), "zhejiang")
+
+    def test_custom_max_age_is_honored(self):
+        db.set_pending_subscription("1", "zhejiang")
+        self.assertIsNone(db.get_pending_subscription("1", max_age_seconds=0))
+        self.assertTrue(db.PENDING_TTL_SECONDS >= 60, "TTL 短得不合理")
+
+    def test_unparsable_timestamp_is_treated_as_expired(self):
+        """时间戳坏了宁可让用户重新确认一次，也不要在几个月后突然兑现。"""
+        db.set_pending_subscription("1", "zhejiang")
+        self._age_pending("1", "not-a-timestamp")
+        self.assertIsNone(db.get_pending_subscription("1"))
+
 
 if __name__ == "__main__":
     unittest.main()

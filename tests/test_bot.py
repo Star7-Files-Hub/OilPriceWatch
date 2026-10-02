@@ -33,7 +33,8 @@ class _FakeDB:
     def set_pending_subscription(self, chat_id, province_slug):
         self.pending[str(chat_id)] = province_slug
 
-    def get_pending_subscription(self, chat_id):
+    def get_pending_subscription(self, chat_id, max_age_seconds=None):
+        # 与真 db 对齐的签名（真实现带 TTL 默认值）；替身不管过期，TTL 由 test_db 覆盖。
         return self.pending.get(str(chat_id))
 
     def clear_pending_subscription(self, chat_id):
@@ -375,6 +376,140 @@ class TestSubscribeConfirmation(unittest.TestCase):
         bot.handle_text(1, "浙江", "private")
         self.assertIsNone(bot.handle_text(1, "是的我在北京", "private"))
         self.assertEqual(self.db.subs, {})
+
+    def test_group_is_not_confirmed_even_with_pending(self):
+        """🔴 纵深防御（复核 P3）：确认路径也必须挡群聊。
+
+        写入端只给私聊留待办，但「群聊完全沉默」不能**只**依赖写入端 ——
+        只要某群有了 pending 行（改库 / 伪造 type=private 的未鉴权端点），
+        确认路径就会回复整个群并把它订阅了。这里直接手工种下 pending 来验第二道闸。
+        """
+        self.db.pending["-1001234567890"] = "zhejiang"
+        for ctype in ("group", "supergroup", "channel"):
+            with self.subTest(chat_type=ctype):
+                self.assertIsNone(bot.handle_text(-1001234567890, "是", ctype))
+        self.assertEqual(self.db.subs, {})
+
+    def test_start_without_province_clears_pending(self):
+        """复核 P4：无参 /oil_start 也清了待办，否则日后一句「是」会偷偷改掉刚设的省份。"""
+        bot.handle_text(1, "浙江", "private")
+        bot.handle_text(1, "/oil_start", "private")
+        self.assertEqual(self.db.pending, {})
+        self.assertIsNone(bot.handle_text(1, "是", "private"))
+        self.assertIsNone(self.db.subs["1"], "残留待办被兑现，悄悄改了省份")
+
+    def test_confirmation_variants_are_recognized(self):
+        """复核 P7：'好' 认而 '好呀' 不认是不对称的，用户以为回了其实被静默。"""
+        for w in (
+            "是", "是的", "好", "好的", "好呀", "好的呢", "嗯", "行", "可以", "对",
+            "要", "要的", "确认", "订阅", "订阅吧", "OK", "ok!", "YES", "y", "是。", " 是 ",
+        ):
+            with self.subTest(word=w):
+                self.assertTrue(bot.is_confirmation(w), f"{w!r} 应该算确认")
+        for w in ("否", "不", "不是", "不用", "不要", "不要了", "不行", "取消", "算了", "no"):
+            with self.subTest(word=w):
+                self.assertTrue(bot.is_confirmation(w), f"{w!r} 应该算否认")
+
+    def test_chitchat_is_never_a_confirmation(self):
+        for w in ("是的我在北京", "你好", "是不是", "好的好的", "没事", "", "   ", "行不行"):
+            with self.subTest(word=w):
+                self.assertFalse(bot.is_confirmation(w), f"{w!r} 不该算确认")
+
+    def test_variant_actually_confirms_via_handle_text(self):
+        bot.handle_text(1, "浙江", "private")
+        reply = bot.handle_text(1, "好呀", "private")
+        self.assertIn("已订阅", reply)
+        self.assertEqual(self.db.subs["1"], "zhejiang")
+
+
+class TestHandleTextDefaultIsConservative(unittest.TestCase):
+    """复核 P6：默认值不能是最宽松的那个 ``private``。
+
+    唯一区分场合的分支就是「纯省份名」，默认宽松意味着将来任何新调用方
+    （新入口 / 脚本 / 测试）忘了传 ``chat_type`` 就会静默走宽松分支。
+    """
+
+    def test_signature_default_is_group(self):
+        import inspect
+
+        default = inspect.signature(bot.handle_text).parameters["chat_type"].default
+        self.assertEqual(default, "group", "handle_text 的默认 chat_type 又变宽松了")
+
+    def test_omitting_chat_type_does_not_ask_or_subscribe(self):
+        self._saved = bot.db
+        bot.db = _FakeDB()
+        try:
+            self.assertIsNone(bot.handle_text(1, "浙江"))
+            self.assertEqual(bot.db.subs, {})
+            self.assertEqual(bot.db.pending, {})
+        finally:
+            bot.db = self._saved
+
+
+class TestDispatchLoggingIsTruthful(unittest.TestCase):
+    """复核 P5：日志必须如实。
+
+    以前「已回复」打在 ``if reply`` **外面**，什么都没发也打印「已回复」——
+    拿日志当发送证据会得出错误结论；同时别人的每条「是」都会刷两行 INFO
+    （和 63896 行那次同属「别人的流量刷我们的日志」）。
+    """
+
+    def setUp(self):
+        self._saved_db, self._saved_send = bot.db, bot.send_message
+        bot.db = _FakeDB()
+        self.sent = []
+        bot.send_message = lambda chat_id, text, **kw: self.sent.append((chat_id, text))
+
+    def tearDown(self):
+        bot.db, bot.send_message = self._saved_db, self._saved_send
+
+    @staticmethod
+    def _update(text, chat=5608153118, chat_type="private"):
+        return {"update_id": 1, "message": {"chat": {"id": chat, "type": chat_type}, "text": text}}
+
+    def test_no_reply_log_when_nothing_sent(self):
+        with self.assertNoLogs("oilwatch.bot", level="INFO"):
+            bot.dispatch_update(self._update("是"))  # 没有待办 ⇒ 沉默
+        self.assertEqual(self.sent, [])
+
+    def test_group_province_name_logs_nothing_at_info(self):
+        with self.assertNoLogs("oilwatch.bot", level="INFO"):
+            bot.dispatch_update(
+                self._update("北京", chat=-100999, chat_type="supergroup")
+            )
+        self.assertEqual(self.sent, [])
+
+    def test_own_command_logs_reply_with_text(self):
+        with self.assertLogs("oilwatch.bot", level="INFO") as cm:
+            bot.dispatch_update(self._update("/oil_start 浙江"))
+        out = "\n".join(cm.output)
+        self.assertIn("已回复", out)
+        self.assertIn("/oil_start", out, "日志里没有原始文本，无法作为收到的证据")
+        self.assertEqual(len(self.sent), 1)
+
+    def test_confirmation_with_pending_logs_reply(self):
+        bot.db.pending["5608153118"] = "zhejiang"
+        with self.assertLogs("oilwatch.bot", level="INFO") as cm:
+            bot.dispatch_update(self._update("是"))
+        self.assertIn("已回复", "\n".join(cm.output))
+
+    def test_malformed_updates_do_not_raise(self):
+        """复核 P8：畸形 update 不该抛 AttributeError（公网入口尤其如此）。"""
+        for bad in (
+            None,
+            [],
+            "x",
+            {},
+            {"message": None},
+            {"message": "not-a-dict"},
+            {"message": {"chat": None, "text": "浙江"}},
+            {"message": {"chat": "not-a-dict", "text": "浙江"}},
+            {"message": {"chat": {"id": None}, "text": "浙江"}},
+            {"message": {"chat": {"id": 1, "type": "private"}, "text": None}},
+        ):
+            with self.subTest(bad=bad):
+                bot.dispatch_update(bad)
+        self.assertEqual(self.sent, [])
 
 
 class TestDispatchSilence(unittest.TestCase):
