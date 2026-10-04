@@ -524,6 +524,21 @@ def _handle_confirmation(chat_id, text: str, chat_type: str = "group") -> str | 
     return _subscribed_reply(p)
 
 
+#: 退订意图的常见错写法（本项目的是 ``/oil_stop``）。
+#: 2026-10-04 真实事故：用户发 ``/stop`` 想退订 ⇒ 在 ``/oil`` 命名空间外 ⇒ 我们
+#: **完全沉默**，用户以为机器人坏了，最后不得不去翻 getUpdates 积压池才查出他发的是什么。
+#: ⚠️ 这个集合**只用于打日志**，不改变回复行为 —— 「要不要回一句提示」是共用 bot 的
+#:    隔离策略问题，得由用户决定（回提示有可能与别的项目重复应答）。
+_UNSUBSCRIBE_LIKE = frozenset(
+    {"stop", "unsubscribe", "退订", "取消订阅", "停止", "别推了", "不要推送", "取消推送"}
+)
+
+
+def looks_like_unsubscribe_attempt(text: str) -> bool:
+    """对方是不是**想退订但敲错了命令**（``/stop``、``退订``…）。"""
+    return _normalize_confirmation(text).lstrip("/").strip() in _UNSUBSCRIBE_LIKE
+
+
 def dispatch_update(update: dict) -> None:
     """Webhook 与 Polling 共用的更新分发。
 
@@ -576,7 +591,17 @@ def dispatch_update(update: dict) -> None:
         )
     else:
         # 认得出但不该回（群里发纯省份名）、或压根不是本项目的消息 ⇒ 如实记为「没回」。
-        logger.debug("按约定不回复 chat=%s type=%s text=%r", chat_id, chat_type, text[:30])
+        if chat_type == "private" and looks_like_unsubscribe_attempt(text):
+            # 只在**私聊** + 只对几个退订短词打 INFO：这类「敲错命令」是用户
+            # 唯一会以为「机器人坏了」的场景，必须留下痕迹（别把别人项目群里的
+            # 流量刷进我们日志，所以群聊仍然只记 debug）。
+            logger.info(
+                "收到疑似退订意图但命令不对 chat=%s text=%r —— 本项目退订命令是 /oil_stop（已按约定不回复）",
+                chat_id,
+                text[:30],
+            )
+        else:
+            logger.debug("按约定不回复 chat=%s type=%s text=%r", chat_id, chat_type, text[:30])
 
 
 # --- 推送 ---------------------------------------------------------------

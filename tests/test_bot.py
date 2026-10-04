@@ -477,6 +477,56 @@ class TestHandleTextDefaultIsConservative(unittest.TestCase):
             bot.db = self._saved
 
 
+class TestUnsubscribeIntentIsVisible(unittest.TestCase):
+    """🔴 2026-10-04 真实事故：用户发 ``/stop`` 想退订 ⇒ 命名空间外 ⇒ 完全沉默，
+
+    用户以为机器人坏了。事后我是靠翻 getUpdates 积压池才查出他发的是 ``/stop`` 的 ——
+    这种「敲错命令」必须能在日志里直接看到，而不是要人去翻 Telegram 队列。
+    ⚠️ 仍然**不回复**（隔离策略：``/stop`` 可能是别的项目的命令），只留 INFO 痕迹。
+    """
+
+    def setUp(self):
+        self.db = _FakeDB()
+        self.sent = []
+        self._orig_db, self._orig_send = bot.db, bot.send_message
+        bot.db, bot.send_message = self.db, lambda cid, t, **k: self.sent.append((cid, t))
+
+    def tearDown(self):
+        bot.db, bot.send_message = self._orig_db, self._orig_send
+
+    def _dispatch(self, text, ctype="private", chat=8809277656):
+        bot.dispatch_update(
+            {"update_id": 1, "message": {"chat": {"id": chat, "type": ctype}, "text": text}}
+        )
+
+    def test_wrong_stop_command_in_private_leaves_a_trace(self):
+        for w in ("/stop", "stop", "STOP", "退订", "取消订阅", "/unsubscribe"):
+            with self.subTest(word=w):
+                with self.assertLogs("oilwatch.bot", level="INFO") as cm:
+                    self._dispatch(w)
+                self.assertIn("/oil_stop", "\n".join(cm.output), "日志没说清正确命令")
+        self.assertEqual(self.sent, [], "只该记日志，绝不能回复（那是别的项目的命令）")
+
+    def test_group_traffic_stays_quiet(self):
+        """群聊里别的项目的 ``/stop`` 不许刷我们的 INFO 日志。"""
+        with self.assertNoLogs("oilwatch.bot", level="INFO"):
+            self._dispatch("/stop", ctype="supergroup")
+        self.assertEqual(self.sent, [])
+
+    def test_unrelated_chitchat_stays_quiet(self):
+        with self.assertNoLogs("oilwatch.bot", level="INFO"):
+            self._dispatch("你好")
+        self.assertEqual(self.sent, [])
+
+    def test_correct_command_still_works_and_is_not_mistaken(self):
+        """``/oil_stop`` 走正常路径（会回复），不该落进「敲错了」那条日志。"""
+        self.db.subs["8809277656"] = "zhejiang"
+        with self.assertLogs("oilwatch.bot", level="INFO") as cm:
+            self._dispatch("/oil_stop")
+        self.assertNotIn("命令不对", "\n".join(cm.output))
+        self.assertEqual(len(self.sent), 1)
+
+
 class TestDispatchLoggingIsTruthful(unittest.TestCase):
     """复核 P5：日志必须如实。
 
