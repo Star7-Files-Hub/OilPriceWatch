@@ -52,6 +52,9 @@ class _FakeDB:
     def subscriber_count(self):
         return len(self.subs)
 
+    def is_subscriber(self, chat_id):
+        return str(chat_id) in self.subs
+
 
 class TestFindProvince(unittest.TestCase):
     def test_full_name(self):
@@ -499,13 +502,33 @@ class TestUnsubscribeIntentIsVisible(unittest.TestCase):
             {"update_id": 1, "message": {"chat": {"id": chat, "type": ctype}, "text": text}}
         )
 
-    def test_wrong_stop_command_in_private_leaves_a_trace(self):
+    def test_wrong_stop_command_from_stranger_leaves_a_trace_only(self):
+        """**非订阅者**发 /stop ⇒ 只记日志、绝不回复（他可能在跟别的项目说话）。"""
         for w in ("/stop", "stop", "STOP", "退订", "取消订阅", "/unsubscribe"):
             with self.subTest(word=w):
                 with self.assertLogs("oilwatch.bot", level="INFO") as cm:
                     self._dispatch(w)
                 self.assertIn("/oil_stop", "\n".join(cm.output), "日志没说清正确命令")
-        self.assertEqual(self.sent, [], "只该记日志，绝不能回复（那是别的项目的命令）")
+        self.assertEqual(self.sent, [], "对非订阅者绝不该回复")
+
+    def test_subscriber_gets_a_hint_in_private(self):
+        """**本项目订阅者**在私聊里敲错 ⇒ 回一句提示，并告诉他正确命令（用户 2026-10-04 决定）。"""
+        self.db.subs["8809277656"] = "zhejiang"
+        for w in ("/stop", "退订"):
+            with self.subTest(word=w):
+                self.sent.clear()
+                with self.assertLogs("oilwatch.bot", level="INFO"):
+                    self._dispatch(w)
+                self.assertEqual(len(self.sent), 1, f"{w!r} 应该回一句提示")
+                self.assertIn("/oil_stop", self.sent[0][1])
+        self.assertIn("8809277656", self.db.subs, "提示不是退订，订阅状态不许动")
+
+    def test_subscriber_in_group_still_gets_nothing(self):
+        """订阅者在**群里**敲错 ⇒ 仍然沉默（别人的群不是我们说话的地方）。"""
+        self.db.subs["8809277656"] = "zhejiang"
+        with self.assertNoLogs("oilwatch.bot", level="INFO"):
+            self._dispatch("/stop", ctype="supergroup")
+        self.assertEqual(self.sent, [])
 
     def test_group_traffic_stays_quiet(self):
         """群聊里别的项目的 ``/stop`` 不许刷我们的 INFO 日志。"""

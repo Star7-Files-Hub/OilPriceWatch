@@ -420,6 +420,19 @@ def handle_text(chat_id, text: str, chat_type: str = "group") -> str | None:
 
     parsed = parse_command(text)
     if parsed is None:
+        # 敲错退订命令的提示（用户 2026-10-04 决定：只在私聊 + 只对本项目订阅者回）。
+        # 真实事故：用户发 `/stop` 想退订，命名空间外 ⇒ 完全沉默 ⇒ 他以为机器人坏了。
+        # 两道闸都是为了共用 bot 的隔离：① 群聊不回（别人的群不是我们说话的地方）；
+        # ② 非订阅者不回 —— 别人的用户发 /stop 是在跟别的项目说话，我们不该插嘴。
+        if (
+            chat_type == "private"
+            and looks_like_unsubscribe_attempt(text)
+            and db.is_subscriber(str(chat_id))
+        ):
+            return (
+                "本项目（油价播报）的退订命令是 /oil_stop —— 发这一条就会停止推送。\n"
+                "（/stop 属于别的项目，我不能替你执行。）"
+            )
         return None
     action, arg = parsed
 
@@ -527,8 +540,8 @@ def _handle_confirmation(chat_id, text: str, chat_type: str = "group") -> str | 
 #: 退订意图的常见错写法（本项目的是 ``/oil_stop``）。
 #: 2026-10-04 真实事故：用户发 ``/stop`` 想退订 ⇒ 在 ``/oil`` 命名空间外 ⇒ 我们
 #: **完全沉默**，用户以为机器人坏了，最后不得不去翻 getUpdates 积压池才查出他发的是什么。
-#: ⚠️ 这个集合**只用于打日志**，不改变回复行为 —— 「要不要回一句提示」是共用 bot 的
-#:    隔离策略问题，得由用户决定（回提示有可能与别的项目重复应答）。
+#: 用途有两个：① 私聊里对本项目订阅者回一句「退订请用 /oil_stop」（用户 2026-10-04 决定）；
+#: ② 没回时在日志里留一行 INFO 痕迹（否则「用户以为机器人坏了」时无从查起）。
 _UNSUBSCRIBE_LIKE = frozenset(
     {"stop", "unsubscribe", "退订", "取消订阅", "停止", "别推了", "不要推送", "取消推送"}
 )

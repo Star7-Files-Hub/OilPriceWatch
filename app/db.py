@@ -176,6 +176,19 @@ def subscriber_count() -> int:
         return conn.execute("SELECT COUNT(*) FROM subscribers").fetchone()[0]
 
 
+def is_subscriber(chat_id: str) -> bool:
+    """这个 chat 是不是**本项目当前的订阅者**。
+
+    用途：共用 bot 上「对方敲错退订命令」时，只有我们自己的订阅者才值得回一句提示 ——
+    别人的用户发 ``/stop`` 是在跟别的项目说话，我们连提示都不该插嘴。
+    """
+    with _session() as conn:
+        row = conn.execute(
+            "SELECT 1 FROM subscribers WHERE chat_id = ? LIMIT 1", (str(chat_id),)
+        ).fetchone()
+    return row is not None
+
+
 # --- 待确认的订阅（私聊里发纯省份名时先问一句）---------------------------
 #
 # 为什么要有这张表而不是直接订阅：这个 bot 与别的项目**共用**，任何用户随手发一句

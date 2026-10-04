@@ -118,6 +118,20 @@ class TestAddSubscriberKeepsProvince(unittest.TestCase):
         db.set_subscriber_province("1", None)
         self.assertIsNone(self._subs()["1"])
 
+    def test_is_subscriber(self):
+        """⚠️ 必须用**真 sqlite** 测：bot 的测试用的是 _FakeDB，它有自己的 is_subscriber，
+
+        所以把真实现改成恒 True 时 bot 那套测试全绿（注入实测存活）。这个函数是
+        「共用 bot 上只对我们的订阅者回退订提示」那道闸，不能没有真实覆盖。
+        """
+        self.assertFalse(db.is_subscriber("1"))
+        db.add_subscriber("1", "zhejiang")
+        self.assertTrue(db.is_subscriber("1"))
+        self.assertTrue(db.is_subscriber(1), "int 形式的 chat_id 也要认")
+        self.assertFalse(db.is_subscriber("2"))
+        db.remove_subscriber("1")
+        self.assertFalse(db.is_subscriber("1"))
+
 
 class TestPendingSubscription(unittest.TestCase):
     """待确认订阅（私聊纯省份名 → 问一句 → 回「是」才订阅）落库语义。
